@@ -25,7 +25,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from .browser import AbrasioBrowserAgent
-from .tools import navigate, observe, interact, evaluate
+from .tools import navigate, observe, interact, evaluate, playbook
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("abrasio_mcp")
@@ -73,6 +73,8 @@ navigate.register(mcp, _get_agent)
 observe.register(mcp, _get_agent)
 interact.register(mcp, _get_agent)
 evaluate.register(mcp, _get_agent)
+# Playbook Engine (spec 2026-07-10): recording/compile tools + network capture.
+playbook.register(mcp, _get_agent)
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,11 @@ from abrasio.human.actions import (
     _resolve_box_async,
 )
 
+# Playbook Engine recording (spec 2026-07-10, C7): instrument the agent methods every MCP
+# tool funnels through. `session.record*` is a no-op unless ABRASIO_RECORD=true, so default
+# behaviour is byte-for-byte unchanged.
+from .recording import session as _recording
+
 logger = logging.getLogger("abrasio_mcp.browser")
 
 # JS that extracts interactive elements with position and a unique selector hint
@@ -98,6 +103,8 @@ class AbrasioBrowserAgent:
             self._abrasio = Abrasio(self._config)
             await self._abrasio.start()
             self._page = await self._abrasio.new_page()
+            # Attach the recording network-capture listener (no-op unless ABRASIO_RECORD=true).
+            _recording.attach(self._page)
             mode = "cloud" if self._config.is_cloud_mode else "local"
             logger.info(f"Browser ready ({mode} mode)")
 
@@ -119,6 +126,7 @@ class AbrasioBrowserAgent:
 
     async def navigate(self, url: str) -> dict:
         response = await self._page.goto(url, wait_until="domcontentloaded")
+        _recording.record("navigate", url=url)
         return {
             "url": self._page.url,
             "title": await self._page.title(),
@@ -158,6 +166,7 @@ class AbrasioBrowserAgent:
 
     async def wait_for(self, selector: str, timeout: int = 10000) -> dict:
         await self._page.wait_for_selector(selector, timeout=timeout)
+        _recording.record("wait_for", selector=selector, timeout=timeout)
         el = await self._page.query_selector(selector)
         text = await el.inner_text() if el else ""
         return {"found": True, "selector": selector, "text": text.strip()[:200]}
@@ -168,27 +177,37 @@ class AbrasioBrowserAgent:
 
     async def click(self, selector: str) -> None:
         await click_human(self._page, selector)
+        _recording.record("click", selector=selector)
 
     async def fill(self, selector: str, text: str) -> None:
         await fill_human(self._page, selector, text)
+        # C5: substitutes a secret_ref for registered values; hard-errors on an
+        # unregistered password value so raw credentials never reach `steps`.
+        await _recording.record_fill(self._page, selector, text)
 
     async def type_text(self, text: str) -> None:
         await type_human(self._page, text)
+        _recording.record("type", text=text)
 
     async def scroll(self, pixels: int = 800) -> None:
         direction = 1 if pixels >= 0 else -1
         await scroll_human(self._page, pixels=abs(pixels) * direction)
+        _recording.record("scroll", pixels=pixels)
 
     async def hover(self, selector: str) -> None:
         x, y = await _resolve_box_async(self._page, selector)
         await human_mouse_move(self._page, (x, y))
+        _recording.record("hover", selector=selector)
 
     async def press_key(self, key: str) -> None:
         await self._page.keyboard.press(key)
+        _recording.record("press", key=key)
 
     # ------------------------------------------------------------------
     # Evaluation
     # ------------------------------------------------------------------
 
     async def evaluate(self, script: str):
-        return await self._page.evaluate(script)
+        result = await self._page.evaluate(script)
+        _recording.record("evaluate", script=script)
+        return result
