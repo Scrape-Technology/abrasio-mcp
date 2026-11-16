@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Scrape-Technology/abrasio-mcp",
+  "title": "Abrasio",
+  "description": "Stealth browser for AI agents: navigate, click, type and extract on bot-protected sites.",
+  "websiteUrl": "https://scrapetechnology.com/abrasio",
+  "repository": {
+    "url": "https://github.com/Scrape-Technology/abrasio-mcp",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "abrasio-mcp",
+      "version": "0.1.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ABRASIO_API_KEY",
+          "description": "Abrasio cloud API key (abr_live_...). Omit to run in free local mode. Get one at https://scrapetechnology.com/abrasio/register",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "ABRASIO_REGION",
+          "description": "Target region for locale, timezone and cloud IP, e.g. BR or US",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "ABRASIO_HEADLESS",
+          "description": "Run the browser headless (true) or with a visible window (false)",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "true"
+        },
+        {
+          "name": "ABRASIO_HUMANIZE",
+          "description": "Enable human-like interaction speed",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "false"
+        }
+      ]
+    }
+  ]
+}

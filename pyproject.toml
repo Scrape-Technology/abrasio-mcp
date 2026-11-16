@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "abrasio-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server that exposes Abrasio as an agentic browser for AI models"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -14,12 +14,15 @@ authors = [
 ]
 keywords = [
     "mcp",
-    "agent",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agents",
     "browser-automation",
+    "stealth-browser",
+    "scraping-browser",
+    "managed-browser",
+    "playwright",
     "abrasio",
-    "stealth",
-    "patchright",
-    "ai-agent",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -32,7 +35,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.8,<2",
     "abrasio>=0.1.2",
 ]
 
@@ -46,8 +49,13 @@ dev = [
 abrasio-mcp = "abrasio_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/Scrape-Technology/abrasio-mcp"
+Homepage = "https://scrapetechnology.com/abrasio"
+Documentation = "https://scrapetechnology.com/abrasio/docs"
 Repository = "https://github.com/Scrape-Technology/abrasio-mcp"
+Issues = "https://github.com/Scrape-Technology/abrasio-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["abrasio_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["abrasio_mcp", "README.md", "LICENSE", "pyproject.toml"]
