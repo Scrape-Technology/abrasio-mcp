@@ -88,8 +88,8 @@ All configuration is done via environment variables. No config files required.
 | `ABRASIO_HEADLESS` | `true` | Run browser headless. Set `false` to see the browser window (local mode only). |
 | `ABRASIO_REGION` | _(none)_ | Target region for geo-configuration, e.g. `BR`, `US`, `DE`. Configures locale and timezone automatically. |
 | `ABRASIO_HUMANIZE` | `false` | Set `true` to enable human-like interaction timing on all actions (slower but more realistic). |
-| `ABRASIO_TRANSPORT` | `stdio` | MCP transport: `stdio` for local clients, `streamable-http` for remote/production. |
-| `ABRASIO_HOST` | `127.0.0.1` | Bind host when using `streamable-http` transport. |
+| `ABRASIO_TRANSPORT` | `stdio` | MCP transport: `stdio` (default) or `streamable-http` (local-only, unauthenticated; see below). |
+| `ABRASIO_HOST` | `127.0.0.1` | Bind host for `streamable-http`. Must be loopback (`127.0.0.1`, `localhost` or `::1`); any other value makes the server refuse to start. |
 | `ABRASIO_PORT` | `8931` | Bind port when using `streamable-http` transport. |
 
 ---
@@ -158,25 +158,33 @@ Add to `.cursor/mcp.json` in your project root:
 }
 ```
 
-### Streamable HTTP (production / remote)
+### Streamable HTTP (local only)
+
+The HTTP transport has no authentication by design, so it only binds to loopback
+(`127.0.0.1`, `localhost` or `::1`). Anyone who could reach the port could drive the
+stealth browser and spend your credits; any other `ABRASIO_HOST` makes the server
+refuse to start.
 
 Start the server:
 
 ```bash
 ABRASIO_TRANSPORT=streamable-http \
-ABRASIO_HOST=0.0.0.0 \
+ABRASIO_HOST=127.0.0.1 \
 ABRASIO_PORT=8931 \
 ABRASIO_API_KEY=abr_live_xxx \
 abrasio-mcp
 ```
 
-Configure the client to connect to `http://your-server:8931/mcp`.
+Configure the client to connect to `http://127.0.0.1:8931/mcp`.
+
+For remote use, run the stdio transport over SSH, or keep the server on loopback and
+reach it through an SSH tunnel or an authenticated reverse proxy that you control.
 
 ---
 
 ## Tools reference
 
-The MCP server exposes 15 tools, organized in four groups.
+The MCP server exposes 17 tools, organized in four groups.
 
 ---
 

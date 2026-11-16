@@ -2,7 +2,7 @@
 abrasio-mcp — MCP server that exposes Abrasio as an agentic browser.
 
 Transport: stdio (default) — works with Claude Desktop, Claude Code, Cursor, etc.
-Transport: streamable-http — for production/cloud deployments.
+Transport: streamable-http — local-only (loopback), unauthenticated.
 
 Environment variables:
   ABRASIO_API_KEY    — Abrasio cloud API key (enables cloud mode; omit for local)
@@ -10,7 +10,7 @@ Environment variables:
   ABRASIO_REGION     — target region, e.g. "BR", "US"
   ABRASIO_HUMANIZE   — "true" to enable human-like interaction speed (default: false)
   ABRASIO_TRANSPORT  — "stdio" (default) or "streamable-http"
-  ABRASIO_HOST       — host for streamable-http (default: 127.0.0.1)
+  ABRASIO_HOST       — loopback host for streamable-http (default: 127.0.0.1)
   ABRASIO_PORT       — port for streamable-http (default: 8931)
 """
 
@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -107,6 +108,15 @@ def main():
     if transport == "streamable-http":
         host = os.getenv("ABRASIO_HOST", "127.0.0.1")
         port = int(os.getenv("ABRASIO_PORT", 8931))
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            sys.exit(
+                f"abrasio-mcp: refusing to bind the streamable-http transport to {host!r}. "
+                "This transport has no authentication: anyone who can reach the port can "
+                "drive the browser and spend your Abrasio credits, so it only binds to "
+                "loopback (127.0.0.1, localhost or ::1). For remote access, run the stdio "
+                "transport over SSH, or keep it on 127.0.0.1 and put an authenticated "
+                "reverse proxy or tunnel that you control in front of that port."
+            )
         logger.info(f"Starting abrasio-mcp HTTP server on {host}:{port}")
         # FastMCP.run() takes no host/port; they live on the server settings.
         mcp.settings.host = host
