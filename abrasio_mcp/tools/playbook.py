@@ -25,7 +25,7 @@ def register(mcp, get_agent):
         """
         List the XHR/fetch calls captured while recording (method, url, status,
         request headers, content-type). Use this to find the internal JSON/API feed behind
-        a page — the odds/price endpoint you can replay directly over HTTP (T0), with no
+        a page — the data endpoint you can replay directly over HTTP (T0), with no
         browser. Only populated when the server runs with ABRASIO_RECORD=true.
         """
         return json.dumps(session.list_requests(), ensure_ascii=False)
@@ -37,7 +37,7 @@ def register(mcp, get_agent):
         (secret_ref) instead of the raw value. Call this, then browser_fill with the same
         value — the recorded step will carry `secret_ref: <ref>`, never the plaintext.
         Filling a password field with an unregistered value is a hard error.
-        Example: playbook_register_secret("vault://bet365/pw", "hunter2").
+        Example: playbook_register_secret("vault://example/pw", "hunter2").
         """
         session.register_secret(ref, value)
         return f"Registered secret ref '{ref}' ({len(value)} chars)"
@@ -53,11 +53,8 @@ def register(mcp, get_agent):
         (schema_domain/schema_mode). `schema` is a {field: type} dict.
 
         Pass `selector` — the CSS selector for the element(s) holding the data you want
-        (found via browser_find_elements / browser_get_html). Without it the T1/T2 replay
-        runner (playbook-runner.ts) has nothing to extract and every run breaks
-        immediately with reason:"response_shape" (bug found in review, 2026-07-15 — this
-        tool used to silently drop the selector even though RecordingSession.mark_extract
-        always supported one).
+        (found via browser_find_elements / browser_get_html). Without it the browser
+        replay has nothing to extract and every run fails with reason:"response_shape".
         """
         session.mark_extract(schema, selector=selector, script=script)
         return f"Marked extract step with {len(schema)} schema field(s)" + (
