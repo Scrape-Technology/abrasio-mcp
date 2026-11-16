@@ -1,8 +1,19 @@
 # abrasio-mcp
 
+<!-- mcp-name: io.github.Scrape-Technology/abrasio-mcp -->
+
+[![PyPI version](https://img.shields.io/pypi/v/abrasio-mcp.svg)](https://pypi.org/project/abrasio-mcp/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
+
 MCP server that exposes **Abrasio** as an agentic browser for AI models.
 
-Allows Claude, Cursor, and any MCP-compatible AI to control a real web browser with full anti-detection fingerprinting — the same stealth infrastructure used for web scraping, now driven by AI.
+Allows Claude, Cursor, and any MCP-compatible AI to control a real, managed stealth browser with realistic fingerprints — the same infrastructure used for web scraping, now driven by AI.
+
+```bash
+pip install abrasio-mcp   # or run without installing: uvx abrasio-mcp
+```
+
+**Local mode is free and needs no API key.** For cloud mode (managed browsers with real fingerprints and persistent profiles), get a key (`abr_live_...`) at [scrapetechnology.com/abrasio/register](https://scrapetechnology.com/abrasio/register). Docs: [scrapetechnology.com/abrasio/docs](https://scrapetechnology.com/abrasio/docs).
 
 ---
 
@@ -15,7 +26,7 @@ AI Model (Claude, Cursor, etc.)
 abrasio-mcp server
     │  Abrasio SDK
     ▼
-Patchright (undetected Playwright fork)
+Patchright (Playwright fork with stealth patches)
     │  CDP WebSocket
     ▼
 Chrome (local stealth)  OR  Abrasio cloud worker (fingerprinted, residential IP)
@@ -60,7 +71,7 @@ Requires an Abrasio API key. The browser runs on Abrasio cloud infrastructure wi
 - Persistent profiles that accumulate browser history
 
 ```bash
-ABRASIO_API_KEY=sk_live_xxx abrasio-mcp
+ABRASIO_API_KEY=abr_live_xxx abrasio-mcp
 ```
 
 Best for: production agents, geo-targeted tasks, heavily protected sites.
@@ -95,7 +106,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
     "abrasio": {
       "command": "abrasio-mcp",
       "env": {
-        "ABRASIO_API_KEY": "sk_live_xxx",
+        "ABRASIO_API_KEY": "abr_live_xxx",
         "ABRASIO_REGION": "BR"
       }
     }
@@ -127,7 +138,7 @@ claude mcp add abrasio -- abrasio-mcp
 With environment variables:
 
 ```bash
-claude mcp add abrasio -e ABRASIO_API_KEY=sk_live_xxx -e ABRASIO_REGION=BR -- abrasio-mcp
+claude mcp add abrasio -e ABRASIO_API_KEY=abr_live_xxx -e ABRASIO_REGION=BR -- abrasio-mcp
 ```
 
 ### Cursor
@@ -140,7 +151,7 @@ Add to `.cursor/mcp.json` in your project root:
     "abrasio": {
       "command": "abrasio-mcp",
       "env": {
-        "ABRASIO_API_KEY": "sk_live_xxx"
+        "ABRASIO_API_KEY": "abr_live_xxx"
       }
     }
   }
@@ -155,7 +166,7 @@ Start the server:
 ABRASIO_TRANSPORT=streamable-http \
 ABRASIO_HOST=0.0.0.0 \
 ABRASIO_PORT=8931 \
-ABRASIO_API_KEY=sk_live_xxx \
+ABRASIO_API_KEY=abr_live_xxx \
 abrasio-mcp
 ```
 
@@ -538,9 +549,9 @@ All interaction methods use the `human/actions.py` primitives from the Abrasio S
 ## Requirements
 
 - Python 3.10+
-- `mcp >= 1.0.0`
+- `mcp >= 1.8, < 2` (the server uses the v1 `FastMCP` API)
 - `abrasio >= 0.1.2` (installs `patchright` automatically)
-- For cloud mode: an Abrasio API key (`sk_live_...`)
+- For cloud mode: an Abrasio API key (`abr_live_...`) — get one at [scrapetechnology.com/abrasio/register](https://scrapetechnology.com/abrasio/register)
 
 ---
 

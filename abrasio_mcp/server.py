@@ -59,7 +59,7 @@ mcp = FastMCP(
     "abrasio-browser",
     instructions=(
         "You control a real web browser via the Abrasio stealth browser. "
-        "The browser runs with anti-detection fingerprinting so it behaves like a real user. "
+        "The browser runs with realistic fingerprints so it behaves like a real user. "
         "Use browser_screenshot to see the current page before deciding what to do. "
         "Use browser_find_elements to discover clickable/fillable elements and their selectors. "
         "Prefer browser_fill over browser_type when targeting a specific input field. "
@@ -108,7 +108,10 @@ def main():
         host = os.getenv("ABRASIO_HOST", "127.0.0.1")
         port = int(os.getenv("ABRASIO_PORT", 8931))
         logger.info(f"Starting abrasio-mcp HTTP server on {host}:{port}")
-        mcp.run(transport="streamable-http", host=host, port=port)
+        # FastMCP.run() takes no host/port; they live on the server settings.
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.run(transport="streamable-http")
     else:
         logger.info("Starting abrasio-mcp stdio server")
         mcp.run(transport="stdio")
