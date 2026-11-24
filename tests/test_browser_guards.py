@@ -5,12 +5,14 @@ import types
 
 import pytest
 
+from abrasio_mcp import browser as browser_mod
 from abrasio_mcp.browser import (
     ALLOW_PRIVATE_HOSTS_ENV,
     MAX_OUTPUT_CHARS,
     AbrasioBrowserAgent,
     _cap_output,
-    _guard_navigation,
+    _guard_request,
+    check_current_url,
     check_navigation_target,
     parse_host,
 )
@@ -127,17 +129,122 @@ class _FakeRoute:
     ("http://127.0.0.1:9/", True, False, "abort"),
     ("http://127.0.0.1:9/", True, True, "fallback"),        # opt-in applies to the route too
     ("http://169.254.169.254/", True, True, "abort"),       # metadata blocked regardless
-    ("http://127.0.0.1:9/api", False, False, "fallback"),   # non-navigation: untouched
     ("https://93.184.216.34/", True, False, "fallback"),
+    # non-navigation (subresource) requests: only literal / localhost hosts are checked
+    ("http://127.0.0.1:9/api", False, False, "abort"),
+    ("http://dev.localhost/app.js", False, False, "abort"),
+    ("http://10.0.0.5/img.png", False, True, "fallback"),   # literal + opt-in: allowed
+    ("http://169.254.169.254/latest", False, True, "abort"),  # metadata even with opt-in
+    ("https://93.184.216.34/x.js", False, False, "fallback"),
 ])
-def test_navigation_route_guard(monkeypatch, url, navigation, opt_in, expected):
+def test_request_route_guard(monkeypatch, url, navigation, opt_in, expected):
     if opt_in:
         monkeypatch.setenv(ALLOW_PRIVATE_HOSTS_ENV, "true")
     else:
         monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
     route = _FakeRoute()
-    asyncio.run(_guard_navigation(route, _FakeRequest(url, navigation)))
+    asyncio.run(_guard_request(route, _FakeRequest(url, navigation)))
     assert route.calls == [expected]
+
+
+def test_hostname_subresource_untouched_without_dns(monkeypatch):
+    def _no_dns(*a, **k):
+        raise AssertionError("subresource hostnames must not be resolved")
+
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", _no_dns)
+    route = _FakeRoute()
+    asyncio.run(_guard_request(route, _FakeRequest("https://cdn.example.com/a.js", False)))
+    assert route.calls == ["fallback"]
+
+
+def test_guard_is_registered_on_the_context_so_popups_are_covered(monkeypatch):
+    class _Context:
+        def __init__(self):
+            self.routes = []
+
+        async def route(self, pattern, handler):
+            self.routes.append((pattern, handler))
+
+    class _Page:
+        def __init__(self):
+            self.context = _Context()
+            self.events = []
+
+        async def route(self, *a):
+            raise AssertionError("guard must be context-scoped, not page-scoped")
+
+        def on(self, event, handler):
+            self.events.append(event)
+
+    page = _Page()
+
+    class _Abrasio:
+        def __init__(self, config):
+            pass
+
+        async def start(self):
+            pass
+
+        async def new_page(self):
+            return page
+
+    monkeypatch.setattr(browser_mod, "Abrasio", _Abrasio)
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._config = types.SimpleNamespace(is_cloud_mode=False)
+    agent._page = None
+    agent._lock = asyncio.Lock()
+    asyncio.run(agent.ensure_started())
+
+    assert page.context.routes == [("**/*", _guard_request)]
+    assert "framenavigated" in page.events
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("about:blank", True), ("about:srcdoc", True), ("data:text/html,hi", True),
+    ("blob:https://93.184.216.34/uuid", True), ("blob:http://127.0.0.1/uuid", False),
+    ("http://127.0.0.1/", False), ("chrome-error://chromewebdata/", False),
+])
+def test_check_current_url_allowed_schemes(monkeypatch, url, ok):
+    monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+    if ok:
+        asyncio.run(check_current_url(url, cloud=False))
+    else:
+        with pytest.raises(ValueError):
+            asyncio.run(check_current_url(url, cloud=False))
+
+
+def test_read_tools_refuse_when_current_url_fails(monkeypatch):
+    monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+    read = []
+
+    class _Page:
+        url = "http://127.0.0.1:8080/admin"  # e.g. landed here via a redirect after a click
+
+        async def inner_text(self, sel):
+            read.append(sel)
+            return "secret admin page"
+
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._config = types.SimpleNamespace(is_cloud_mode=False)
+    agent._page = _Page()
+    with pytest.raises(ValueError):
+        asyncio.run(agent.get_text())
+    assert read == []
+
+
+def test_framenavigated_listener_leaves_refused_main_frame(monkeypatch):
+    monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+    gone = []
+
+    class _Page:
+        async def goto(self, url):
+            gone.append(url)
+
+    frame = types.SimpleNamespace(parent_frame=None, url="http://127.0.0.1/", page=_Page())
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._config = types.SimpleNamespace(is_cloud_mode=False)
+    asyncio.run(agent._leave_if_unsafe(frame))
+    assert gone == ["about:blank"]
 
 
 def test_navigate_rechecks_final_url_after_redirect(monkeypatch):

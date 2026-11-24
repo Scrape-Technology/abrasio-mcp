@@ -123,18 +123,39 @@ def _cap_output(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n[truncated: {len(text) - MAX_OUTPUT_CHARS} more characters]"
 
 
-async def _guard_navigation(route, request) -> None:
-    """page.route handler (local mode): abort navigation requests (main frame and
-    subframes) that fail check_navigation_target. Every other request falls back
-    untouched to the next handler (e.g. the SDK's client-certificate route), so the
-    recording `response` listener sees exactly what it saw before."""
-    if request.is_navigation_request():
+async def check_current_url(url: str, cloud: bool) -> None:
+    """check_navigation_target for a URL a page is already on. Lets through only content
+    that involves no network fetch: about:blank, about:srcdoc and data: (top-level data:
+    navigations are blocked by Chromium anyway); a blob: URL is checked by its origin."""
+    if url in ("about:blank", "about:srcdoc") or url.startswith("data:"):
+        return
+    await check_navigation_target(url[len("blob:"):] if url.startswith("blob:") else url, cloud)
+
+
+async def _guard_request(route, request) -> None:
+    """context.route handler (local mode). Navigation requests (main frame, subframes,
+    popups) get the full check, DNS included. Other requests are checked only when the
+    host is an address or a localhost name, i.e. parse_host needs no DNS lookup; anything
+    else falls back untouched to the next handler, so the recording `response` listener
+    sees what it saw before.
+
+    ponytail: still open — subresource hostnames that resolve to private addresses (no
+    per-request DNS on purpose), WebSocket and service-worker traffic (not seen by
+    page/context routes), and DNS rebinding.
+    """
+    if not request.is_navigation_request():
         try:
-            await check_navigation_target(request.url, cloud=False)
-        except ValueError as exc:
-            logger.warning("Blocked navigation to %s: %s", request.url, exc)
-            await route.abort("blockedbyclient")
-            return
+            if parse_host(urlsplit(request.url).hostname or "")[1] is None:
+                await route.fallback()  # a hostname: no per-request DNS lookup
+                return
+        except ValueError:
+            pass  # malformed numeric host: the check below refuses it
+    try:
+        await check_navigation_target(request.url, cloud=False)
+    except ValueError as exc:
+        logger.warning("Blocked request to %s: %s", request.url, exc)
+        await route.abort("blockedbyclient")
+        return
     await route.fallback()
 
 # JS that extracts interactive elements with position and a unique selector hint
@@ -211,13 +232,14 @@ class AbrasioBrowserAgent:
             self._abrasio = Abrasio(self._config)
             await self._abrasio.start()
             self._page = await self._abrasio.new_page()
-            # Local mode: re-check every page-initiated navigation (links, JS, meta refresh,
-            # iframes). Not in cloud mode: the worker resolves and fetches, this host cannot
-            # see the real destination. ponytail: Playwright auto-continues 3xx hops without
-            # calling the route (navigate() re-checks its final URL; a redirect after a
-            # click is not covered), and routing turns off the browser HTTP cache.
+            # Local mode: guard every request of the context (this page and any popup the
+            # site opens). Not in cloud mode: the worker resolves and fetches, this host
+            # cannot see the real destination. Routing turns off the browser HTTP cache.
             if not self._config.is_cloud_mode:
-                await self._page.route("**/*", _guard_navigation)
+                await self._page.context.route("**/*", _guard_request)
+            # Playwright auto-continues 3xx hops without calling routes: re-check where the
+            # main frame lands, and the read methods re-check before returning content.
+            self._page.on("framenavigated", self._leave_if_unsafe)
             # Attach the recording network-capture listener (no-op unless ABRASIO_RECORD=true).
             _recording.attach(self._page)
             mode = "cloud" if self._config.is_cloud_mode else "local"
@@ -228,6 +250,28 @@ class AbrasioBrowserAgent:
         if self._page is None:
             raise RuntimeError("Browser not started — call ensure_started() first")
         return self._page
+
+    async def _leave_if_unsafe(self, frame) -> None:
+        """framenavigated listener: a main frame that landed on a refused URL (e.g. via a
+        redirect after a click) is sent to about:blank."""
+        if frame.parent_frame is not None:
+            return
+        try:
+            await check_current_url(frame.url, cloud=self._config.is_cloud_mode)
+        except ValueError as exc:
+            logger.warning("Leaving %s: %s", frame.url, exc)
+            try:
+                await frame.page.goto("about:blank")
+            except Exception:
+                logger.debug("could not leave %s", frame.url, exc_info=True)
+
+    async def _read(self, fn):
+        """Run a page read only while the page is on an allowed URL, checked before and
+        after, so content from a refused page never returns (the listener is async)."""
+        await check_current_url(self._page.url, cloud=self._config.is_cloud_mode)
+        result = await fn()
+        await check_current_url(self._page.url, cloud=self._config.is_cloud_mode)
+        return result
 
     async def close(self) -> None:
         if self._abrasio:
@@ -242,7 +286,7 @@ class AbrasioBrowserAgent:
     async def navigate(self, url: str) -> dict:
         await check_navigation_target(url, cloud=self._config.is_cloud_mode)
         response = await self._page.goto(url, wait_until="domcontentloaded")
-        try:  # 3xx hops never reach page.route: re-check where the redirects ended up
+        try:  # 3xx hops never reach the route: re-check where the redirects ended up
             await check_navigation_target(self._page.url, cloud=self._config.is_cloud_mode)
         except ValueError:
             await self._page.goto("about:blank")
@@ -274,23 +318,23 @@ class AbrasioBrowserAgent:
     # ------------------------------------------------------------------
 
     async def screenshot(self) -> bytes:
-        return await self._page.screenshot(type="png")
+        return await self._read(lambda: self._page.screenshot(type="png"))
 
     async def get_text(self) -> str:
-        return _cap_output(await self._page.inner_text("body"))
+        return _cap_output(await self._read(lambda: self._page.inner_text("body")))
 
     async def get_html(self, selector: str = "body") -> str:
-        return _cap_output(await self._page.inner_html(selector))
+        return _cap_output(await self._read(lambda: self._page.inner_html(selector)))
 
     async def find_elements(self) -> list:
-        return await self._page.evaluate(_FIND_ELEMENTS_JS)
+        return await self._read(lambda: self._page.evaluate(_FIND_ELEMENTS_JS))
 
     async def wait_for(self, selector: str, timeout: int = 10000) -> dict:
         timeout = max(1, min(int(timeout), 60000))  # Playwright treats 0 as "no timeout"
         await self._page.wait_for_selector(selector, timeout=timeout)
         _recording.record("wait_for", selector=selector, timeout=timeout)
         el = await self._page.query_selector(selector)
-        text = await el.inner_text() if el else ""
+        text = await self._read(el.inner_text) if el else ""
         return {"found": True, "selector": selector, "text": text.strip()[:200]}
 
     # ------------------------------------------------------------------
@@ -331,6 +375,6 @@ class AbrasioBrowserAgent:
     # ------------------------------------------------------------------
 
     async def evaluate(self, script: str):
-        result = await self._page.evaluate(script)
+        result = await self._read(lambda: self._page.evaluate(script))
         _recording.record("evaluate", script=script)
         return result
