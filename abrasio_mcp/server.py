@@ -24,6 +24,7 @@ import sys
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .browser import AbrasioBrowserAgent
 from .tools import navigate, observe, interact, evaluate, playbook
@@ -123,6 +124,14 @@ def main():
         # FastMCP.run() takes no host/port; they live on the server settings.
         mcp.settings.host = host
         mcp.settings.port = port
+        # DNS-rebinding protection, explicit rather than relying on the library default
+        # (older mcp releases left it off): only loopback Host/Origin headers on this port.
+        loopback = ("127.0.0.1", "localhost", "[::1]")
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[f"{h}:{port}" for h in loopback],
+            allowed_origins=[f"http://{h}:{port}" for h in loopback],
+        )
         mcp.run(transport="streamable-http")
     else:
         logger.info("Starting abrasio-mcp stdio server")

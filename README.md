@@ -558,7 +558,7 @@ All interaction methods use the `human/actions.py` primitives from the Abrasio S
 ## Requirements
 
 - Python 3.10+
-- `mcp >= 1.8, < 2` (the server uses the v1 `FastMCP` API)
+- `mcp >= 1.10, < 2` (the server uses the v1 `FastMCP` API and its `TransportSecuritySettings`)
 - `abrasio >= 0.1.2` (installs `patchright` automatically)
 - For cloud mode: an Abrasio API key (`abr_live_...`) — get one at [scrapetechnology.com/abrasio/register](https://scrapetechnology.com/abrasio/register)
 
