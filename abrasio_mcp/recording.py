@@ -169,8 +169,16 @@ class RecordingSession:
             logger.debug("network capture failed for a response", exc_info=True)
 
     def list_requests(self) -> list[dict]:
+        """Captured requests for the model, with token header values redacted. The raw
+        values stay in `_requests` for capture_request, which stores them as secret_refs."""
         with self._lock:
-            return list(self._requests)
+            return [
+                {**e, "request_headers": {
+                    k: "[redacted]" if k.lower() in _TOKEN_HEADER_NAMES else v
+                    for k, v in (e.get("request_headers") or {}).items()
+                }}
+                for e in self._requests
+            ]
 
     # ── Playbook tool ops ────────────────────────────────────────────────────
 

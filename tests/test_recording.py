@@ -269,6 +269,22 @@ def test_capture_request_sets_http_transport_and_request_step(monkeypatch):
     assert "secret_ref" in blob
 
 
+def test_list_requests_redacts_tokens_but_capture_still_gets_them(monkeypatch):
+    monkeypatch.setenv("ABRASIO_RECORD", "true")
+    s = RecordingSession()
+    _seed_captured_request(
+        s,
+        "https://book.example/api/odds",
+        headers={"Cookie": "sid=raw-cookie", "authorization": "Bearer raw-token", "accept": "json"},
+    )
+
+    listed = s.list_requests()[0]["request_headers"]
+    assert listed == {"Cookie": "[redacted]", "authorization": "[redacted]", "accept": "json"}
+
+    s.capture_request("https://book.example/api/odds")
+    assert s.finalize("x", "book.example")["secrets"]["session_token"] in ("sid=raw-cookie", "Bearer raw-token")
+
+
 def test_capture_request_without_a_seen_request_raises(monkeypatch):
     monkeypatch.setenv("ABRASIO_RECORD", "true")
     s = RecordingSession()
