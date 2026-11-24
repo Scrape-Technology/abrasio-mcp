@@ -220,6 +220,30 @@ def test_fill_fails_closed_when_field_type_cannot_be_determined(monkeypatch):
     assert "could-be-a-real-password" not in json.dumps(s.finalize("x", "book.example")["steps"])
 
 
+def test_type_into_focused_password_field_is_guarded_like_fill(monkeypatch):
+    """browser_type records via record_fill(page, None, text): the focused element
+    (":focus") gets the same password-field guard and secret_ref substitution."""
+    monkeypatch.setenv("ABRASIO_RECORD", "true")
+    s = RecordingSession()
+    page = _FakePage({":focus": "password"})
+
+    with pytest.raises(ValueError):
+        asyncio.run(s.record_fill(page, None, "typed-secret"))
+
+    s.register_secret("vault://x/pw", "typed-secret")
+    asyncio.run(s.record_fill(page, None, "typed-secret"))
+    asyncio.run(s.record_fill(_FakePage(), None, "plain words"))
+
+    steps = s.finalize("x", "book.example")["steps"]
+    assert steps == [
+        {"op": "type", "secret_ref": "vault://x/pw"},
+        {"op": "type", "text": "plain words"},
+    ]
+
+    from abrasio_mcp.browser import AbrasioBrowserAgent
+    assert "record_fill(" in inspect.getsource(AbrasioBrowserAgent.type_text)
+
+
 # ── Network capture → T0 request step ───────────────────────────────────────
 
 

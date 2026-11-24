@@ -94,23 +94,27 @@ class RecordingSession:
                 step[k] = v
         self._append(step)
 
-    async def record_fill(self, page: Any, selector: str, text: str) -> None:
+    async def record_fill(self, page: Any, selector: Optional[str], text: str) -> None:
         """Record a `fill`, substituting a `secret_ref` for registered values. No-op unless
         recording is enabled. Raises if a password field is filled with an unregistered
-        value (C5)."""
+        value (C5). `selector=None` records a `type` into the focused element
+        (browser_type) under the same rules."""
         if not self.enabled:
             return
+        step: dict = {"op": "fill", "selector": selector} if selector else {"op": "type"}
         ref = self._ref_for_value(text)
         if ref:
-            self._append({"op": "fill", "selector": selector, "secret_ref": ref})
+            self._append({**step, "secret_ref": ref})
             return
-        if await self._is_password_field(page, selector):
+        # ponytail: ":focus" misses focus inside iframes and, with nothing focused, waits
+        # Playwright's default timeout; both fail closed (treated as a password field).
+        if await self._is_password_field(page, selector or ":focus"):
             raise ValueError(
-                f"Refusing to record a raw secret for password field '{selector}'. "
-                f"Call playbook_register_secret(ref, value) before browser_fill so the "
-                f"playbook stores a secret_ref, never the plaintext."
+                f"Refusing to record a raw secret for password field '{selector or ':focus'}'. "
+                f"Call playbook_register_secret(ref, value) before browser_fill/browser_type "
+                f"so the playbook stores a secret_ref, never the plaintext."
             )
-        self._append({"op": "fill", "selector": selector, "text": text})
+        self._append({**step, "text": text})
 
     async def _is_password_field(self, page: Any, selector: str) -> bool:
         """Fail CLOSED (bug found in review, 2026-07-15): if we can't determine the

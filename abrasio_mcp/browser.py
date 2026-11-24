@@ -236,7 +236,8 @@ class AbrasioBrowserAgent:
 
     async def type_text(self, text: str) -> None:
         await type_human(self._page, text)
-        _recording.record("type", text=text)
+        # Same secret_ref / password-field guard as fill, against the focused element.
+        await _recording.record_fill(self._page, None, text)
 
     async def scroll(self, pixels: int = 800) -> None:
         direction = 1 if pixels >= 0 else -1
