@@ -219,6 +219,7 @@ def test_read_tools_refuse_when_current_url_fails(monkeypatch):
 
     class _Page:
         url = "http://127.0.0.1:8080/admin"  # e.g. landed here via a redirect after a click
+        frames = [types.SimpleNamespace(url=url)]
 
         async def inner_text(self, sel):
             read.append(sel)
@@ -232,19 +233,68 @@ def test_read_tools_refuse_when_current_url_fails(monkeypatch):
     assert read == []
 
 
-def test_framenavigated_listener_leaves_refused_main_frame(monkeypatch):
+def test_read_refuses_while_a_refused_subframe_is_present(monkeypatch):
+    monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+    shots = []
+
+    class _Page:
+        url = "https://93.184.216.34/"
+        frames = [
+            types.SimpleNamespace(url=url),
+            types.SimpleNamespace(url="https://93.184.216.34/ad"),  # same host: one check
+            types.SimpleNamespace(url="about:blank"),
+            types.SimpleNamespace(url="http://169.254.169.254/latest/meta-data/"),  # redirected iframe
+        ]
+
+        async def screenshot(self, type):
+            shots.append(type)
+            return b"png"
+
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._config = types.SimpleNamespace(is_cloud_mode=False)
+    agent._page = _Page()
+    with pytest.raises(ValueError):
+        asyncio.run(agent.screenshot())
+    assert shots == []
+
+
+def test_read_discards_result_when_listener_refuses_mid_read(monkeypatch):
+    """The page hops to a refused address during the read and the listener sends it
+    back to about:blank, so the after-check alone would pass: the counter catches it."""
+    monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+
+    class _Page:
+        url = "https://93.184.216.34/"
+        frames = [types.SimpleNamespace(url=url)]
+
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._config = types.SimpleNamespace(is_cloud_mode=False)
+    agent._page = _Page()
+
+    async def _goto(url):
+        pass
+
+    async def _fn():
+        await agent._leave_if_unsafe(types.SimpleNamespace(url="http://127.0.0.1/", goto=_goto))
+        return "refused page content"
+
+    with pytest.raises(ValueError):
+        asyncio.run(agent._read(_fn))
+
+
+@pytest.mark.parametrize("parent", [None, "main-frame"])
+def test_framenavigated_listener_leaves_refused_frame(monkeypatch, parent):
     monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
     gone = []
 
-    class _Page:
-        async def goto(self, url):
-            gone.append(url)
+    async def _goto(url):
+        gone.append(url)
 
-    frame = types.SimpleNamespace(parent_frame=None, url="http://127.0.0.1/", page=_Page())
+    frame = types.SimpleNamespace(parent_frame=parent, url="http://127.0.0.1/", goto=_goto)
     agent = object.__new__(AbrasioBrowserAgent)
     agent._config = types.SimpleNamespace(is_cloud_mode=False)
     asyncio.run(agent._leave_if_unsafe(frame))
-    assert gone == ["about:blank"]
+    assert gone == ["about:blank"]  # main frame and subframe alike
 
 
 def test_navigate_rechecks_final_url_after_redirect(monkeypatch):

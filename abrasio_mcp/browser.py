@@ -204,6 +204,8 @@ class AbrasioBrowserAgent:
     Lazily started on first tool call so the MCP server starts instantly.
     """
 
+    _refusals = 0  # frames the framenavigated listener refused (see _read)
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -252,25 +254,42 @@ class AbrasioBrowserAgent:
         return self._page
 
     async def _leave_if_unsafe(self, frame) -> None:
-        """framenavigated listener: a main frame that landed on a refused URL (e.g. via a
-        redirect after a click) is sent to about:blank."""
-        if frame.parent_frame is not None:
-            return
+        """framenavigated listener: a frame (main or sub) that landed on a refused URL
+        (e.g. via a redirect after a click, or an iframe redirected to loopback) is sent
+        to about:blank; a frame already detached is left alone."""
         try:
             await check_current_url(frame.url, cloud=self._config.is_cloud_mode)
         except ValueError as exc:
+            self._refusals += 1  # before neutralising: lets an in-flight _read notice
             logger.warning("Leaving %s: %s", frame.url, exc)
             try:
-                await frame.page.goto("about:blank")
+                await frame.goto("about:blank")
             except Exception:
                 logger.debug("could not leave %s", frame.url, exc_info=True)
 
+    async def _check_frames(self) -> None:
+        """check_current_url over every frame of the page, one check per (scheme, host)."""
+        seen = set()
+        for frame in self._page.frames:
+            url = frame.url
+            parts = urlsplit(url[len("blob:"):] if url.startswith("blob:") else url)
+            key = (parts.scheme, parts.hostname) if parts.hostname else url
+            if key in seen:
+                continue
+            seen.add(key)
+            await check_current_url(url, cloud=self._config.is_cloud_mode)
+
     async def _read(self, fn):
-        """Run a page read only while the page is on an allowed URL, checked before and
-        after, so content from a refused page never returns (the listener is async)."""
-        await check_current_url(self._page.url, cloud=self._config.is_cloud_mode)
+        """Run a page read only while every frame is on an allowed URL, checked before
+        and after, so content from a refused frame never returns (the listener is async;
+        screenshots render iframes). A listener refusal during the read discards the
+        result, since the frame may already be back on about:blank by the second check."""
+        refusals = self._refusals
+        await self._check_frames()
         result = await fn()
-        await check_current_url(self._page.url, cloud=self._config.is_cloud_mode)
+        if self._refusals != refusals:
+            raise ValueError("Refusing to return content: a frame navigated to a refused address during the read.")
+        await self._check_frames()
         return result
 
     async def close(self) -> None:
