@@ -114,6 +114,15 @@ async def check_navigation_target(url: str, cloud: bool) -> None:
             raise ValueError(f"Refusing to navigate to non-public address {ip}.{hint}")
 
 
+MAX_OUTPUT_CHARS = 200_000  # get_text/get_html cap, keeps one page from flooding the model
+
+
+def _cap_output(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    return text[:MAX_OUTPUT_CHARS] + f"\n[truncated: {len(text) - MAX_OUTPUT_CHARS} more characters]"
+
+
 async def _guard_navigation(route, request) -> None:
     """page.route handler (local mode): abort navigation requests (main frame and
     subframes) that fail check_navigation_target. Every other request falls back
@@ -268,15 +277,16 @@ class AbrasioBrowserAgent:
         return await self._page.screenshot(type="png")
 
     async def get_text(self) -> str:
-        return await self._page.inner_text("body")
+        return _cap_output(await self._page.inner_text("body"))
 
     async def get_html(self, selector: str = "body") -> str:
-        return await self._page.inner_html(selector)
+        return _cap_output(await self._page.inner_html(selector))
 
     async def find_elements(self) -> list:
         return await self._page.evaluate(_FIND_ELEMENTS_JS)
 
     async def wait_for(self, selector: str, timeout: int = 10000) -> dict:
+        timeout = max(1, min(int(timeout), 60000))  # Playwright treats 0 as "no timeout"
         await self._page.wait_for_selector(selector, timeout=timeout)
         _recording.record("wait_for", selector=selector, timeout=timeout)
         el = await self._page.query_selector(selector)

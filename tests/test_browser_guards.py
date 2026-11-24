@@ -7,7 +7,9 @@ import pytest
 
 from abrasio_mcp.browser import (
     ALLOW_PRIVATE_HOSTS_ENV,
+    MAX_OUTPUT_CHARS,
     AbrasioBrowserAgent,
+    _cap_output,
     _guard_navigation,
     check_navigation_target,
     parse_host,
@@ -156,3 +158,27 @@ def test_navigate_rechecks_final_url_after_redirect(monkeypatch):
     with pytest.raises(ValueError):
         asyncio.run(agent.navigate("https://93.184.216.34/"))
     assert agent._page.url == "about:blank"
+
+
+@pytest.mark.parametrize("given,used", [(0, 1), (-5, 1), (10_000, 10_000), (10**9, 60_000)])
+def test_wait_for_timeout_is_clamped(given, used):
+    seen = []
+
+    class _Page:
+        async def wait_for_selector(self, selector, timeout):
+            seen.append(timeout)
+
+        async def query_selector(self, selector):
+            return None
+
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._page = _Page()
+    asyncio.run(agent.wait_for("#x", timeout=given))
+    assert seen == [used]
+
+
+def test_text_output_is_capped_with_marker():
+    assert _cap_output("short") == "short"
+    out = _cap_output("a" * (MAX_OUTPUT_CHARS + 7))
+    assert out.startswith("a" * MAX_OUTPUT_CHARS)
+    assert out.endswith("[truncated: 7 more characters]")

@@ -285,6 +285,20 @@ def test_list_requests_redacts_tokens_but_capture_still_gets_them(monkeypatch):
     assert s.finalize("x", "book.example")["secrets"]["session_token"] in ("sid=raw-cookie", "Bearer raw-token")
 
 
+def test_captured_requests_are_capped_with_marker(monkeypatch):
+    from abrasio_mcp.recording import MAX_CAPTURED_REQUESTS
+
+    monkeypatch.setenv("ABRASIO_RECORD", "true")
+    s = RecordingSession()
+    for i in range(MAX_CAPTURED_REQUESTS + 3):
+        _seed_captured_request(s, f"https://book.example/api/{i}")
+
+    listed = s.list_requests()
+    assert listed[0] == {"truncated": "3 older requests dropped"}
+    assert len(listed) == MAX_CAPTURED_REQUESTS + 1
+    assert listed[-1]["url"] == f"https://book.example/api/{MAX_CAPTURED_REQUESTS + 2}"
+
+
 def test_capture_request_without_a_seen_request_raises(monkeypatch):
     monkeypatch.setenv("ABRASIO_RECORD", "true")
     s = RecordingSession()

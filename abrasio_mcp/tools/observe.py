@@ -58,7 +58,7 @@ def register(mcp, get_agent):
         """
         Wait for an element matching the CSS selector to appear in the DOM.
         Useful after triggering an action that causes a loading state.
-        timeout: max milliseconds to wait (default 10000).
+        timeout: max milliseconds to wait (default 10000, clamped to 1..60000).
         Returns the element's text content when found.
         """
         agent: AbrasioBrowserAgent = await get_agent()

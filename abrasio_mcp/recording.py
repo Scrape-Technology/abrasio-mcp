@@ -39,6 +39,8 @@ _TOKEN_HEADER_NAMES = {
     "x-csrf-token",
 }
 
+MAX_CAPTURED_REQUESTS = 500  # oldest entries are dropped beyond this
+
 
 def _enabled() -> bool:
     return os.getenv("ABRASIO_RECORD", "false").lower() == "true"
@@ -51,6 +53,7 @@ class RecordingSession:
     def __init__(self) -> None:
         self._steps: list[dict] = []
         self._requests: list[dict] = []          # captured XHR/fetch log (T0 discovery)
+        self._requests_dropped = 0               # entries evicted by MAX_CAPTURED_REQUESTS
         self._secrets: dict[str, str] = {}        # secret_ref -> raw value
         self._value_to_ref: dict[str, str] = {}   # raw value -> secret_ref
         self._schema: Optional[dict] = None
@@ -165,6 +168,9 @@ class RecordingSession:
                     "request_headers": dict(req.headers),
                     "content_type": response.headers.get("content-type"),
                 })
+                if len(self._requests) > MAX_CAPTURED_REQUESTS:
+                    del self._requests[0]
+                    self._requests_dropped += 1
         except Exception:
             logger.debug("network capture failed for a response", exc_info=True)
 
@@ -172,13 +178,16 @@ class RecordingSession:
         """Captured requests for the model, with token header values redacted. The raw
         values stay in `_requests` for capture_request, which stores them as secret_refs."""
         with self._lock:
-            return [
+            out = [
                 {**e, "request_headers": {
                     k: "[redacted]" if k.lower() in _TOKEN_HEADER_NAMES else v
                     for k, v in (e.get("request_headers") or {}).items()
                 }}
                 for e in self._requests
             ]
+            if self._requests_dropped:
+                out.insert(0, {"truncated": f"{self._requests_dropped} older requests dropped"})
+            return out
 
     # ── Playbook tool ops ────────────────────────────────────────────────────
 
@@ -247,6 +256,7 @@ class RecordingSession:
         with self._lock:
             self._steps.clear()
             self._requests.clear()
+            self._requests_dropped = 0
             self._secrets.clear()
             self._value_to_ref.clear()
             self._schema = None
