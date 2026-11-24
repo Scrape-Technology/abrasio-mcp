@@ -11,9 +11,10 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import socket
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from abrasio import Abrasio, AbrasioConfig
 from abrasio.human.actions import (
@@ -36,6 +37,43 @@ logger = logging.getLogger("abrasio_mcp.browser")
 # server). Link-local and cloud metadata addresses stay blocked regardless.
 ALLOW_PRIVATE_HOSTS_ENV = "ABRASIO_ALLOW_PRIVATE_HOSTS"
 _METADATA_IPS = {ipaddress.ip_address("fd00:ec2::254")}  # AWS IMDS over IPv6 (ULA, not link-local)
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
+
+
+def parse_host(host: str) -> tuple[str, Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]]:
+    """Normalise a URL host the way Chromium does (WHATWG URL host parser) and return
+    (host, address). address is None for a DNS name; localhost and *.localhost map to
+    127.0.0.1, like the browser. A host whose last label is numeric is an IPv4 literal
+    in decimal, 0x-hex or leading-zero octal parts (1-4 parts, the last one filling the
+    remaining bytes): "127.1", "0x7f.1", "017700000001", "2130706433". Raises ValueError
+    for hosts the browser would reject too (bad IDNA, malformed numeric host)."""
+    host = unquote(host)
+    if ":" in host:  # IPv6 literal (urlsplit already removed the brackets)
+        return host, ipaddress.ip_address(host.split("%")[0])
+    try:
+        host = (host if host.isascii() else host.encode("idna").decode("ascii")).lower()
+    except UnicodeError:
+        raise ValueError(f"Refusing to navigate: invalid host {host!r}.")
+    host = host.rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return host, ipaddress.ip_address("127.0.0.1")
+    labels = host.split(".")
+    if not _NUMERIC_LABEL.fullmatch(labels[-1]):
+        return host, None
+    nums = []
+    for label in labels:
+        if re.fullmatch(r"0[xX][0-9a-fA-F]*", label):
+            nums.append(int(label[2:] or "0", 16))
+        elif re.fullmatch(r"0[0-7]+", label):
+            nums.append(int(label, 8))
+        elif re.fullmatch(r"0|[1-9][0-9]*", label):
+            nums.append(int(label))
+        else:
+            raise ValueError(f"Refusing to navigate: malformed numeric host {host!r}.")
+    if len(nums) > 4 or any(n > 255 for n in nums[:-1]) or nums[-1] >= 256 ** (5 - len(nums)):
+        raise ValueError(f"Refusing to navigate: malformed numeric host {host!r}.")
+    value = nums[-1] + sum(n << 8 * (3 - i) for i, n in enumerate(nums[:-1]))
+    return host, ipaddress.IPv4Address(value)
 
 
 async def check_navigation_target(url: str, cloud: bool) -> None:
@@ -43,32 +81,30 @@ async def check_navigation_target(url: str, cloud: bool) -> None:
 
     Local mode (the browser runs on this machine): the host must not be, or resolve to,
     a loopback/private/link-local/unspecified address, unless ABRASIO_ALLOW_PRIVATE_HOSTS
-    is "true" (link-local and metadata stay blocked). Cloud mode: only IP literals (and
-    "localhost") are checked; names resolve on the cloud worker, not here.
+    is "true" (link-local and metadata stay blocked). Cloud mode: only IP literals and
+    *.localhost are checked; names resolve on the cloud worker, not here.
 
-    ponytail: validates the navigation target only — redirects, in-page navigations and
-    DNS rebinding after this check are not covered; enforce on the browser side if needed.
+    ponytail: DNS rebinding between this check and the browser's own connection is not
+    covered at this layer; that needs enforcement where the connection is made.
     """
     if "\\" in url or any(ord(c) <= 0x20 for c in url):
         raise ValueError("Refusing to navigate: URL contains backslashes, spaces or control characters.")
     parts = urlsplit(url)
-    host = parts.hostname
-    if parts.scheme.lower() not in ("http", "https") or not host:
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
         raise ValueError("Refusing to navigate: only http:// and https:// URLs are allowed.")
     allow_private = not cloud and os.getenv(ALLOW_PRIVATE_HOSTS_ENV, "").lower() == "true"
-    if cloud and host.rstrip(".").lower() == "localhost":
-        raise ValueError("Refusing to navigate to a loopback host.")
-    try:
-        # Off the event loop; AI_NUMERICHOST makes the cloud check parse literals without DNS.
-        infos = await asyncio.get_running_loop().getaddrinfo(
-            host, None, flags=socket.AI_NUMERICHOST if cloud else 0
-        )
-    except socket.gaierror:
-        if cloud:
-            return  # a hostname, resolved by the cloud worker
-        raise ValueError(f"Refusing to navigate: cannot resolve host {host!r}.")
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+    host, literal = parse_host(parts.hostname)
+    if literal is not None:
+        ips = [literal]
+    elif cloud:
+        return  # a hostname, resolved by the cloud worker
+    else:
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(host, None)  # off the event loop
+        except socket.gaierror:
+            raise ValueError(f"Refusing to navigate: cannot resolve host {host!r}.")
+        ips = [ipaddress.ip_address(info[4][0].split("%")[0]) for info in infos]
+    for ip in ips:
         if ip.version == 6 and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if ip.is_link_local or ip in _METADATA_IPS:
@@ -76,6 +112,21 @@ async def check_navigation_target(url: str, cloud: bool) -> None:
         if not allow_private and not ip.is_global:
             hint = "" if cloud else f" Set {ALLOW_PRIVATE_HOSTS_ENV}=true to allow your own dev server."
             raise ValueError(f"Refusing to navigate to non-public address {ip}.{hint}")
+
+
+async def _guard_navigation(route, request) -> None:
+    """page.route handler (local mode): abort navigation requests (main frame and
+    subframes) that fail check_navigation_target. Every other request falls back
+    untouched to the next handler (e.g. the SDK's client-certificate route), so the
+    recording `response` listener sees exactly what it saw before."""
+    if request.is_navigation_request():
+        try:
+            await check_navigation_target(request.url, cloud=False)
+        except ValueError as exc:
+            logger.warning("Blocked navigation to %s: %s", request.url, exc)
+            await route.abort("blockedbyclient")
+            return
+    await route.fallback()
 
 # JS that extracts interactive elements with position and a unique selector hint
 _FIND_ELEMENTS_JS = """
@@ -151,6 +202,13 @@ class AbrasioBrowserAgent:
             self._abrasio = Abrasio(self._config)
             await self._abrasio.start()
             self._page = await self._abrasio.new_page()
+            # Local mode: re-check every page-initiated navigation (links, JS, meta refresh,
+            # iframes). Not in cloud mode: the worker resolves and fetches, this host cannot
+            # see the real destination. ponytail: Playwright auto-continues 3xx hops without
+            # calling the route (navigate() re-checks its final URL; a redirect after a
+            # click is not covered), and routing turns off the browser HTTP cache.
+            if not self._config.is_cloud_mode:
+                await self._page.route("**/*", _guard_navigation)
             # Attach the recording network-capture listener (no-op unless ABRASIO_RECORD=true).
             _recording.attach(self._page)
             mode = "cloud" if self._config.is_cloud_mode else "local"
@@ -175,6 +233,11 @@ class AbrasioBrowserAgent:
     async def navigate(self, url: str) -> dict:
         await check_navigation_target(url, cloud=self._config.is_cloud_mode)
         response = await self._page.goto(url, wait_until="domcontentloaded")
+        try:  # 3xx hops never reach page.route: re-check where the redirects ended up
+            await check_navigation_target(self._page.url, cloud=self._config.is_cloud_mode)
+        except ValueError:
+            await self._page.goto("about:blank")
+            raise
         _recording.record("navigate", url=url)
         return {
             "url": self._page.url,

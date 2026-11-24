@@ -1,10 +1,17 @@
 """Input guards on AbrasioBrowserAgent: navigation targets, timeouts and output caps."""
 
 import asyncio
+import types
 
 import pytest
 
-from abrasio_mcp.browser import ALLOW_PRIVATE_HOSTS_ENV, check_navigation_target
+from abrasio_mcp.browser import (
+    ALLOW_PRIVATE_HOSTS_ENV,
+    AbrasioBrowserAgent,
+    _guard_navigation,
+    check_navigation_target,
+    parse_host,
+)
 
 
 def _check(url, cloud=False):
@@ -55,4 +62,97 @@ def test_cloud_mode_blocks_scheme_and_ip_literals(monkeypatch, url):
 
 
 def test_cloud_mode_does_not_resolve_hostnames():
-    _check("https://example.com/", cloud=True)  # AI_NUMERICHOST: no DNS lookup here
+    _check("https://example.com/", cloud=True)  # names are left to the cloud worker
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("127.1", "127.0.0.1"),
+    ("0x7f.1", "127.0.0.1"),
+    ("017700000001", "127.0.0.1"),
+    ("2130706433", "127.0.0.1"),
+    ("0x7f000001", "127.0.0.1"),
+    ("0251.0376.0251.0376", "169.254.169.254"),
+    ("%31%32%37.0.0.1", "127.0.0.1"),
+    ("127.0.0.1.", "127.0.0.1"),
+    ("１２７.0.0.1", "127.0.0.1"),  # fullwidth digits, IDNA-normalised
+    ("localhost.", "127.0.0.1"),
+    ("api.localhost", "127.0.0.1"),
+    ("example.com", None),
+    ("cafe.bad", None),  # hex letters only, but the last label is not a number
+])
+def test_parse_host_matches_browser(host, expected):
+    _, ip = parse_host(host)
+    assert (str(ip) if ip else None) == expected
+
+
+@pytest.mark.parametrize("host", ["1.2.3.4.5", "256.1.1.1", "1.0x100.1", "08.0.0.1", "1..1", "1.0xg.1"])
+def test_parse_host_rejects_malformed_numeric(host):
+    with pytest.raises(ValueError):
+        parse_host(host)
+
+
+@pytest.mark.parametrize("url", [
+    "http://0x7f.1/", "http://017700000001/", "http://127.1/", "http://2130706433/",
+    "http://%31%32%37.0.0.1/", "http://169.254.169.254./", "http://dev.localhost/",
+    "http://08.0.0.1/",
+])
+def test_cloud_mode_blocks_browser_numeric_forms(url):
+    with pytest.raises(ValueError):
+        _check(url, cloud=True)
+
+
+class _FakeRequest:
+    def __init__(self, url, navigation):
+        self.url = url
+        self._nav = navigation
+
+    def is_navigation_request(self):
+        return self._nav
+
+
+class _FakeRoute:
+    def __init__(self):
+        self.calls = []
+
+    async def abort(self, code=None):
+        self.calls.append("abort")
+
+    async def fallback(self):
+        self.calls.append("fallback")
+
+
+@pytest.mark.parametrize("url,navigation,opt_in,expected", [
+    ("http://127.0.0.1:9/", True, False, "abort"),
+    ("http://127.0.0.1:9/", True, True, "fallback"),        # opt-in applies to the route too
+    ("http://169.254.169.254/", True, True, "abort"),       # metadata blocked regardless
+    ("http://127.0.0.1:9/api", False, False, "fallback"),   # non-navigation: untouched
+    ("https://93.184.216.34/", True, False, "fallback"),
+])
+def test_navigation_route_guard(monkeypatch, url, navigation, opt_in, expected):
+    if opt_in:
+        monkeypatch.setenv(ALLOW_PRIVATE_HOSTS_ENV, "true")
+    else:
+        monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+    route = _FakeRoute()
+    asyncio.run(_guard_navigation(route, _FakeRequest(url, navigation)))
+    assert route.calls == [expected]
+
+
+def test_navigate_rechecks_final_url_after_redirect(monkeypatch):
+    """3xx hops never reach page.route, so navigate() re-checks where it landed."""
+    monkeypatch.delenv(ALLOW_PRIVATE_HOSTS_ENV, raising=False)
+
+    class _RedirectingPage:
+        url = "about:blank"
+
+        async def goto(self, url, **kw):
+            # a public page answering 302 -> loopback
+            self.url = "http://127.0.0.1:8080/admin" if url.startswith("https://93.") else url
+
+    agent = object.__new__(AbrasioBrowserAgent)
+    agent._config = types.SimpleNamespace(is_cloud_mode=False)
+    agent._page = _RedirectingPage()
+
+    with pytest.raises(ValueError):
+        asyncio.run(agent.navigate("https://93.184.216.34/"))
+    assert agent._page.url == "about:blank"
