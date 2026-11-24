@@ -88,6 +88,7 @@ All configuration is done via environment variables. No config files required.
 | `ABRASIO_HEADLESS` | `true` | Run browser headless. Set `false` to see the browser window (local mode only). |
 | `ABRASIO_REGION` | _(none)_ | Target region for geo-configuration, e.g. `BR`, `US`, `DE`. Configures locale and timezone automatically. |
 | `ABRASIO_HUMANIZE` | `false` | Set `true` to enable human-like interaction timing on all actions (slower but more realistic). |
+| `ABRASIO_ALLOW_PRIVATE_HOSTS` | `false` | `browser_navigate` only opens `http`/`https` URLs on public addresses. Local mode only: set `true` to allow loopback/private hosts (e.g. your own dev server). Link-local and cloud metadata addresses stay blocked. |
 | `ABRASIO_TRANSPORT` | `stdio` | MCP transport: `stdio` (default) or `streamable-http` (local-only, unauthenticated; see below). |
 | `ABRASIO_HOST` | `127.0.0.1` | Bind host for `streamable-http`. Must be loopback (`127.0.0.1`, `localhost` or `::1`); any other value makes the server refuse to start. |
 | `ABRASIO_PORT` | `8931` | Bind port when using `streamable-http` transport. |

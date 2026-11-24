@@ -8,9 +8,12 @@ that the MCP tools delegate to. Lazy-started on first tool call.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
+import socket
 from typing import Optional
+from urllib.parse import urlsplit
 
 from abrasio import Abrasio, AbrasioConfig
 from abrasio.human.actions import (
@@ -28,6 +31,51 @@ from abrasio.human.actions import (
 from .recording import session as _recording
 
 logger = logging.getLogger("abrasio_mcp.browser")
+
+# Local mode only: "true" lets browser_navigate reach loopback/private hosts (your own dev
+# server). Link-local and cloud metadata addresses stay blocked regardless.
+ALLOW_PRIVATE_HOSTS_ENV = "ABRASIO_ALLOW_PRIVATE_HOSTS"
+_METADATA_IPS = {ipaddress.ip_address("fd00:ec2::254")}  # AWS IMDS over IPv6 (ULA, not link-local)
+
+
+async def check_navigation_target(url: str, cloud: bool) -> None:
+    """Raise ValueError unless `url` is an http(s) URL whose host is safe to open.
+
+    Local mode (the browser runs on this machine): the host must not be, or resolve to,
+    a loopback/private/link-local/unspecified address, unless ABRASIO_ALLOW_PRIVATE_HOSTS
+    is "true" (link-local and metadata stay blocked). Cloud mode: only IP literals (and
+    "localhost") are checked; names resolve on the cloud worker, not here.
+
+    ponytail: validates the navigation target only — redirects, in-page navigations and
+    DNS rebinding after this check are not covered; enforce on the browser side if needed.
+    """
+    if "\\" in url or any(ord(c) <= 0x20 for c in url):
+        raise ValueError("Refusing to navigate: URL contains backslashes, spaces or control characters.")
+    parts = urlsplit(url)
+    host = parts.hostname
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        raise ValueError("Refusing to navigate: only http:// and https:// URLs are allowed.")
+    allow_private = not cloud and os.getenv(ALLOW_PRIVATE_HOSTS_ENV, "").lower() == "true"
+    if cloud and host.rstrip(".").lower() == "localhost":
+        raise ValueError("Refusing to navigate to a loopback host.")
+    try:
+        # Off the event loop; AI_NUMERICHOST makes the cloud check parse literals without DNS.
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, None, flags=socket.AI_NUMERICHOST if cloud else 0
+        )
+    except socket.gaierror:
+        if cloud:
+            return  # a hostname, resolved by the cloud worker
+        raise ValueError(f"Refusing to navigate: cannot resolve host {host!r}.")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.is_link_local or ip in _METADATA_IPS:
+            raise ValueError(f"Refusing to navigate to link-local/metadata address {ip}.")
+        if not allow_private and not ip.is_global:
+            hint = "" if cloud else f" Set {ALLOW_PRIVATE_HOSTS_ENV}=true to allow your own dev server."
+            raise ValueError(f"Refusing to navigate to non-public address {ip}.{hint}")
 
 # JS that extracts interactive elements with position and a unique selector hint
 _FIND_ELEMENTS_JS = """
@@ -125,6 +173,7 @@ class AbrasioBrowserAgent:
     # ------------------------------------------------------------------
 
     async def navigate(self, url: str) -> dict:
+        await check_navigation_target(url, cloud=self._config.is_cloud_mode)
         response = await self._page.goto(url, wait_until="domcontentloaded")
         _recording.record("navigate", url=url)
         return {
