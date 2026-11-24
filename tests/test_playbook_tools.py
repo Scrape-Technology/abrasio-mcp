@@ -69,3 +69,29 @@ def test_playbook_mark_extract_without_selector_or_script_still_works(monkeypatc
     step = playbook_tools.session.finalize("x", "book.example")["steps"][-1]
     assert step["op"] == "extract"
     assert "selector" not in step
+
+
+def test_playbook_finalize_writes_secrets_to_a_private_file_not_the_result(monkeypatch, tmp_path):
+    """Audit 2026-11-09: the tool used to return `secrets` in plaintext to the model."""
+    import json
+    import os
+    import tempfile
+
+    monkeypatch.setenv("ABRASIO_RECORD", "true")
+    monkeypatch.setattr(playbook_tools, "session", RecordingSession())
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    playbook_tools.session.register_secret("vault://x/pw", "hunter2-raw")
+    playbook_tools.session.record("navigate", url="https://book.example/")
+
+    result = asyncio.run(_register()["playbook_finalize"]("x", "book.example"))
+
+    assert "hunter2-raw" not in result
+    out = json.loads(result)
+    assert out["secret_refs"] == ["vault://x/pw"]
+    assert "secrets" not in out["playbook"]
+    with open(out["playbook_file"], encoding="utf-8") as f:
+        body = json.load(f)  # exactly the POST /api/playbooks body
+    assert body["secrets"] == {"vault://x/pw": "hunter2-raw"}
+    assert body["steps"] == out["playbook"]["steps"]
+    if os.name == "posix":
+        assert os.stat(out["playbook_file"]).st_mode & 0o777 == 0o600

@@ -17,8 +17,8 @@ Behaviors covered:
   * Observation methods (get_text/get_html/find_elements/screenshot) in
     browser.py never call into the recorder at all (static source check).
   * fill: registered value → secret_ref (no raw); unregistered password → hard error.
-  * capture_request → transport="http" + op:"request"; token-like headers
-    become secret_ref:session_token, never raw.
+  * capture_request → transport="http" + op:"request"; each token-like header
+    becomes its own secret_ref:header:<name>, never raw.
   * finalize → documented shape.
 
 `enabled` is a live property (reads ABRASIO_RECORD from the env on every check), so
@@ -282,7 +282,22 @@ def test_list_requests_redacts_tokens_but_capture_still_gets_them(monkeypatch):
     assert listed == {"Cookie": "[redacted]", "authorization": "[redacted]", "accept": "json"}
 
     s.capture_request("https://book.example/api/odds")
-    assert s.finalize("x", "book.example")["secrets"]["session_token"] in ("sid=raw-cookie", "Bearer raw-token")
+    out = s.finalize("x", "book.example")
+    # Each token header gets its own ref — Cookie and Authorization used to collide.
+    assert out["steps"][-1]["request"]["headers"] == {
+        "Cookie": "secret_ref:header:cookie",
+        "authorization": "secret_ref:header:authorization",
+        "accept": "json",
+    }
+    assert out["secrets"] == {"header:cookie": "sid=raw-cookie", "header:authorization": "Bearer raw-token"}
+
+    # Same header, different value on another request → a new ref, the first one intact.
+    _seed_captured_request(s, "https://book.example/api/other", headers={"Cookie": "sid=other"})
+    s.capture_request("https://book.example/api/other")
+    out = s.finalize("x", "book.example")
+    assert out["steps"][-1]["request"]["headers"] == {"Cookie": "secret_ref:header:cookie:2"}
+    assert out["secrets"]["header:cookie"] == "sid=raw-cookie"
+    assert out["secrets"]["header:cookie:2"] == "sid=other"
 
 
 def test_captured_requests_are_capped_with_marker(monkeypatch):

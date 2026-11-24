@@ -9,6 +9,8 @@ page (T0), and finalizes a playbook the deterministic runtime replays with no LL
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from typing import TYPE_CHECKING, Optional
 
 from ..recording import session
@@ -67,8 +69,8 @@ def register(mcp, get_agent):
         Compile the page's internal API call into a T0 (`http`) request step. Pass a url
         that appeared in browser_list_requests(). Emits an `op:"request"` step and switches
         the playbook transport to `http`, so replay is a plain HTTP poll with no browser.
-        Token-looking headers (Authorization, Cookie, …) are stored as
-        `secret_ref:session_token`, never raw.
+        Token-looking headers (Authorization, Cookie, …) each get their own ref, e.g.
+        `secret_ref:header:cookie`, never raw.
         """
         step = session.capture_request(url)
         return json.dumps({"captured": True, "transport": "http", "step": step}, ensure_ascii=False)
@@ -76,10 +78,22 @@ def register(mcp, get_agent):
     @mcp.tool()
     async def playbook_finalize(name: str, domain: str) -> str:
         """
-        Finalize the recorded trajectory into a playbook JSON:
-        {name, domain, transport, steps, schema, profile_domain, secrets}.
-        POST this to the api `POST /playbooks`, which write-throughs the schema to
-        `page_schemas` and seals `secrets` into `secrets_enc`. Requires ABRASIO_RECORD=true
-        to have captured any steps.
+        Finalize the recorded trajectory. Writes the full `POST /api/playbooks` body
+        {name, domain, transport, steps, schema, profile_domain, secrets} to a private
+        temp file and returns {playbook_file, secret_refs, playbook} — `playbook` is the
+        same body WITHOUT `secrets`; secret values never come back here. POST the file
+        as-is to the api (which seals `secrets` into `secrets_enc`), then delete it.
+        Requires ABRASIO_RECORD=true to have captured any steps.
         """
-        return json.dumps(session.finalize(name, domain), ensure_ascii=False)
+        body = session.finalize(name, domain)
+        secrets = body.pop("secrets")
+        # mkstemp: O_EXCL, mode 0600 on POSIX; on Windows the per-user %TEMP% ACL applies.
+        fd, path = tempfile.mkstemp(prefix="playbook-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({**body, "secrets": secrets}, f, ensure_ascii=False)
+        return json.dumps({
+            "playbook_file": path,
+            "secret_refs": sorted(secrets),
+            "playbook": body,
+            "next": "POST playbook_file as-is to <api>/api/playbooks (X-API-KEY), then delete it.",
+        }, ensure_ascii=False)

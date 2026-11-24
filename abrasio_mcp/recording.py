@@ -15,7 +15,8 @@ default MCP behaviour is byte-for-byte unchanged.
 Secrets (spec C5): raw credentials NEVER enter ``steps``. The agent calls
 ``playbook_register_secret(ref, value)`` first; a `fill` whose value is registered records
 a ``secret_ref``; a `fill` on a password-type input whose value is NOT registered is a hard
-error. Registered values are returned by ``finalize`` under ``secrets`` for the API to seal.
+error. ``finalize`` returns registered values under ``secrets`` for the API to seal; the
+``playbook_finalize`` tool writes that body to a private file and never returns the values.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from typing import Any, Optional
 logger = logging.getLogger("abrasio_mcp.recording")
 
 # Request-header names whose values are treated as session tokens when a T0 request is
-# captured — stored as `secret_ref:session_token`, never raw (spec network-capture note).
+# captured — stored as `secret_ref:header:<name>`, never raw (spec network-capture note).
 _TOKEN_HEADER_NAMES = {
     "authorization",
     "cookie",
@@ -203,9 +204,27 @@ class RecordingSession:
             step["script"] = script
         self._append(step)
 
+    def _header_ref(self, name: str, value: str) -> str:
+        """One ref per distinct captured token value: `header:<name>` (lowercased), then
+        `header:<name>:2`, … when the same header carried a different value on another
+        captured request. A value already registered reuses its ref."""
+        with self._lock:
+            ref = self._value_to_ref.get(value)
+            if ref:
+                return ref
+            base = ref = f"header:{name.lower()}"
+            n = 2
+            while ref in self._secrets:
+                ref = f"{base}:{n}"
+                n += 1
+            self._secrets[ref] = value
+            self._value_to_ref[value] = ref
+            return ref
+
     def capture_request(self, url: str) -> dict:
         """Emit an `op:"request"` step from a captured XHR/fetch and switch the playbook to
-        T0 (`transport="http"`). Token-looking headers become `secret_ref:session_token`."""
+        T0 (`transport="http"`). Each token-looking header gets its own secret ref
+        (`secret_ref:header:cookie`, `secret_ref:header:authorization`, …), never raw."""
         match = None
         with self._lock:
             for entry in reversed(self._requests):
@@ -220,8 +239,7 @@ class RecordingSession:
         headers: dict[str, str] = {}
         for name, value in (match.get("request_headers") or {}).items():
             if name.lower() in _TOKEN_HEADER_NAMES:
-                self.register_secret("session_token", value)
-                headers[name] = "secret_ref:session_token"
+                headers[name] = f"secret_ref:{self._header_ref(name, value)}"
             else:
                 headers[name] = value
         self._transport = "http"  # T0

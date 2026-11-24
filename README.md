@@ -470,6 +470,27 @@ document.title
 
 > Use this for data extraction that `browser_get_text` and `browser_get_html` cannot handle — structured data, counts, computed values, or interacting with the page's JavaScript environment.
 
+### Playbook recording (`ABRASIO_RECORD=true`)
+
+#### `playbook_finalize`
+
+Writes the full `POST /api/playbooks` body (`name`, `domain`, `transport`, `steps`, `schema`, `profile_domain`, `secrets`) to a new temp file (mode `0600` on POSIX, the per-user temp dir on Windows) and returns:
+
+```json
+{"playbook_file": "/tmp/playbook-abc123.json",
+ "secret_refs": ["header:cookie", "vault://example/pw"],
+ "playbook": {"name": "...", "domain": "...", "transport": "...", "steps": [], "schema": null, "profile_domain": "..."},
+ "next": "..."}
+```
+
+Secret values are never in the result. Send the file as-is, then delete it:
+
+```bash
+curl -X POST "$API/api/playbooks" -H "X-API-KEY: $KEY" -H "Content-Type: application/json" --data-binary @/tmp/playbook-abc123.json
+```
+
+`playbook_capture_request` gives each token header its own ref: `secret_ref:header:cookie`, `secret_ref:header:authorization` (and `header:cookie:2` if the same header carried another value on a different captured request).
+
 ---
 
 ## Patterns and best practices
