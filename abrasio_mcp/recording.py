@@ -13,32 +13,54 @@ Scope guard: everything here is a no-op unless ``ABRASIO_RECORD=true``. When off
 default MCP behaviour is byte-for-byte unchanged.
 
 Secrets (spec C5): raw credentials NEVER enter ``steps``. The agent calls
-``playbook_register_secret(ref, value)`` first; a `fill` whose value is registered records
-a ``secret_ref``; a `fill` on a password-type input whose value is NOT registered is a hard
-error. ``finalize`` returns registered values under ``secrets`` for the API to seal; the
-``playbook_finalize`` tool writes that body to a private file and never returns the values.
+``playbook_register_secret(ref, value)`` first; a `fill`/`type` whose value is registered
+records a ``secret_ref``; typing an unregistered value into an element that looks like a
+credential field (checked on the focused element, before any keystroke) is a hard error.
+``finalize`` refuses if a registered value still shows up anywhere in ``steps`` and returns
+the values under ``secrets`` for the API to seal; the ``playbook_finalize`` tool uploads
+that body itself and never returns the values.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("abrasio_mcp.recording")
 
-# Request-header names whose values are treated as session tokens when a T0 request is
-# captured — stored as `secret_ref:header:<name>`, never raw (spec network-capture note).
-_TOKEN_HEADER_NAMES = {
-    "authorization",
-    "cookie",
-    "x-auth-token",
-    "x-access-token",
-    "x-session-token",
-    "x-api-key",
-    "x-csrf-token",
+# Request headers that stay in clear in captures and listings. Every other header is
+# treated as a possible credential: a secret ref in captured steps, "[redacted]" in
+# browser_list_requests (an allowlist, so unknown token headers fail closed).
+_CLEAR_HEADER_NAMES = {
+    "content-type", "content-length", "origin", "referer", "user-agent",
+    "x-requested-with", "cache-control", "pragma", "dnt",
 }
+_CLEAR_HEADER_PREFIXES = ("accept", "sec-")
+
+
+def _is_secret_header(name: str) -> bool:
+    name = name.lower()
+    return name not in _CLEAR_HEADER_NAMES and not name.startswith(_CLEAR_HEADER_PREFIXES)
+
+
+# The element that will receive the keys: document.activeElement, through shadow roots.
+# Focus inside an iframe shows up here as the IFRAME element itself.
+_ACTIVE_ELEMENT_JS = """
+() => {
+    let el = document.activeElement;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+    if (!el) return null;
+    return {
+        tag: el.tagName,
+        type: String(el.type || el.getAttribute('type') || '').toLowerCase(),
+        autocomplete: String(el.getAttribute('autocomplete') || '').toLowerCase(),
+    };
+}
+"""
 
 MAX_CAPTURED_REQUESTS = 500  # oldest entries are dropped beyond this
 
@@ -74,7 +96,14 @@ class RecordingSession:
     # ── Secrets (C5) ─────────────────────────────────────────────────────────
 
     def register_secret(self, ref: str, value: str) -> None:
+        if not ref or not value:
+            raise ValueError("playbook_register_secret needs a non-empty ref and value.")
+        if ref.startswith("header:"):
+            raise ValueError("Secret refs starting with 'header:' are reserved for captured headers.")
         with self._lock:
+            old = self._secrets.get(ref)
+            if old is not None and self._value_to_ref.get(old) == ref:
+                del self._value_to_ref[old]  # re-registering a ref drops its old value's mapping
             self._secrets[ref] = value
             self._value_to_ref[value] = ref
 
@@ -98,46 +127,51 @@ class RecordingSession:
                 step[k] = v
         self._append(step)
 
-    async def record_fill(self, page: Any, selector: Optional[str], text: str) -> None:
-        """Record a `fill`, substituting a `secret_ref` for registered values. No-op unless
-        recording is enabled. Raises if a password field is filled with an unregistered
-        value (C5). `selector=None` records a `type` into the focused element
-        (browser_type) under the same rules."""
+    async def fill_step(self, page: Any, selector: Optional[str], text: str) -> Optional[dict]:
+        """Build the step for a `fill` (or a `type` when `selector` is None) BEFORE any
+        keystroke, with the target already focused. Registered values become a
+        `secret_ref`. Raises if the focused element looks like a credential field and the
+        value is not registered (C5). None when recording is off. Pass the result to
+        `add` once the typing succeeded."""
         if not self.enabled:
-            return
+            return None
         step: dict = {"op": "fill", "selector": selector} if selector else {"op": "type"}
         ref = self._ref_for_value(text)
         if ref:
-            self._append({**step, "secret_ref": ref})
-            return
-        # ponytail: ":focus" misses focus inside iframes and, with nothing focused, waits
-        # Playwright's default timeout; both fail closed (treated as a password field).
-        if await self._is_password_field(page, selector or ":focus"):
+            return {**step, "secret_ref": ref}
+        if await self._focused_is_secret(page):
             raise ValueError(
-                f"Refusing to record a raw secret for password field '{selector or ':focus'}'. "
-                f"Call playbook_register_secret(ref, value) before browser_fill/browser_type "
-                f"so the playbook stores a secret_ref, never the plaintext."
+                "Refusing to type an unregistered value into a credential field (password, "
+                "one-time code, card, iframe or unknown target). Call "
+                "playbook_register_secret(ref, value) before browser_fill/browser_type "
+                "so the playbook stores a secret_ref, never the plaintext."
             )
-        self._append({**step, "text": text})
+        return {**step, "text": text}
 
-    async def _is_password_field(self, page: Any, selector: str) -> bool:
-        """Fail CLOSED (bug found in review, 2026-07-15): if we can't determine the
-        field type — a transient Playwright error, a stale handle, the page mid-
-        navigation — we must NOT silently conclude "not a password field" and let a
-        raw, unregistered value get recorded as plaintext. Treating the unknown case
-        as "is a password field" only ever costs the agent one extra
-        playbook_register_secret call; treating it as "not" risks leaking a real
-        credential into `steps` (C5's whole purpose)."""
+    def add(self, step: Optional[dict]) -> None:
+        if step is not None:
+            self._append(step)
+
+    async def _focused_is_secret(self, page: Any) -> bool:
+        """Inspect the element that will receive the keys (document.activeElement,
+        through shadow roots). Fails CLOSED: an iframe (can't see inside), nothing
+        focused, or any evaluate error counts as a credential field."""
         try:
-            t = await page.get_attribute(selector, "type")
-            return (t or "").lower() == "password"
+            info = await page.evaluate(_ACTIVE_ELEMENT_JS)
         except Exception:
-            logger.warning(
-                "Could not determine field type for '%s' — treating as a password "
-                "field to avoid recording a raw value we can't verify is safe.",
-                selector,
-            )
+            logger.warning("Could not inspect the focused element; treating it as a credential field.")
             return True
+        if not isinstance(info, dict):
+            return True
+        tokens = (info.get("autocomplete") or "").split()
+        field = tokens[-1] if tokens else ""
+        return (
+            info.get("tag") in ("IFRAME", "BODY", "HTML")  # iframe, or nothing focused
+            or info.get("type") == "password"
+            or field.endswith("password")
+            or field == "one-time-code"
+            or field.startswith("cc-")
+        )
 
     # ── Network capture (enables T0 compilation) ─────────────────────────────
 
@@ -153,20 +187,21 @@ class RecordingSession:
         self._attached_page = page
         logger.info("RecordingSession: network capture attached")
 
-    def _on_response(self, response: Any) -> None:
-        # Sync handler using only sync Playwright properties — safe inside the event loop.
+    async def _on_response(self, response: Any) -> None:
         try:
             req = response.request
             rtype = req.resource_type
             if rtype not in ("xhr", "fetch"):
                 return
+            # all_headers(): `request.headers` omits Cookie; drop HTTP/2 pseudo-headers.
+            headers = {k: v for k, v in (await req.all_headers()).items() if not k.startswith(":")}
             with self._lock:
                 self._requests.append({
                     "method": req.method,
                     "url": req.url,
                     "resource_type": rtype,
                     "status": response.status,
-                    "request_headers": dict(req.headers),
+                    "request_headers": headers,
                     "content_type": response.headers.get("content-type"),
                 })
                 if len(self._requests) > MAX_CAPTURED_REQUESTS:
@@ -181,7 +216,7 @@ class RecordingSession:
         with self._lock:
             out = [
                 {**e, "request_headers": {
-                    k: "[redacted]" if k.lower() in _TOKEN_HEADER_NAMES else v
+                    k: "[redacted]" if _is_secret_header(k) else v
                     for k, v in (e.get("request_headers") or {}).items()
                 }}
                 for e in self._requests
@@ -238,7 +273,7 @@ class RecordingSession:
             )
         headers: dict[str, str] = {}
         for name, value in (match.get("request_headers") or {}).items():
-            if name.lower() in _TOKEN_HEADER_NAMES:
+            if _is_secret_header(name):
                 headers[name] = f"secret_ref:{self._header_ref(name, value)}"
             else:
                 headers[name] = value
@@ -257,17 +292,24 @@ class RecordingSession:
         return step
 
     def finalize(self, name: str, domain: str) -> dict:
-        """Return the recorded trajectory JSON to POST to `api` `POST /playbooks`."""
+        """Return the recorded trajectory JSON to POST to `api` `POST /playbooks`.
+        Raises if `domain` does not match the first navigation, or if a registered
+        secret value leaked into `steps` (evaluate script, press keys, URL, schema…)."""
         with self._lock:
-            return {
-                "name": name,
-                "domain": domain,
-                "transport": self._transport,
-                "steps": list(self._steps),
-                "schema": self._schema,
-                "profile_domain": domain,  # DECISION 3: pool key is the domain, not a profile id
-                "secrets": dict(self._secrets),
-            }
+            steps = list(self._steps)
+            secrets = dict(self._secrets)
+            schema, transport = self._schema, self._transport
+        _check_domain(steps, domain)
+        _check_no_secret_values(steps, secrets)
+        return {
+            "name": name,
+            "domain": domain,
+            "transport": transport,
+            "steps": steps,
+            "schema": schema,
+            "profile_domain": domain,  # DECISION 3: pool key is the domain, not a profile id
+            "secrets": secrets,
+        }
 
     def reset(self) -> None:
         """Clear the recording (start a fresh trajectory)."""
@@ -279,6 +321,52 @@ class RecordingSession:
             self._value_to_ref.clear()
             self._schema = None
             self._transport = "browser"
+
+
+def _check_domain(steps: list[dict], domain: str) -> None:
+    """The model names the domain, so check it against what was actually opened: the
+    host of the first recorded navigate step must equal `domain` or be a subdomain of it.
+    ponytail: no public-suffix list, so a 'co.uk'-style domain passes; a single label
+    ('com') does not."""
+    d = (domain or "").lower().rstrip(".")
+    first = next((s for s in steps if s.get("op") == "navigate"), None)
+    if first is None:
+        raise ValueError("Refusing to finalize: no navigation was recorded, so the domain cannot be checked.")
+    host = (urlsplit(str(first.get("url", ""))).hostname or "").rstrip(".")
+    if "." not in d or not (host == d or host.endswith("." + d)):
+        raise ValueError(
+            f"Refusing to finalize: domain {domain!r} does not match the first navigated host {host!r}."
+        )
+
+
+def _check_no_secret_values(steps: list[dict], secrets: dict[str, str]) -> None:
+    """Refuse if a secret value appears in any serialized step, or in a run of
+    consecutive single-character `press` steps. Names the step, never the value.
+    ponytail: captured-header values shorter than 8 chars are skipped (tiny header values
+    like 'en' or '2' would match unrelated steps); user-registered values are always checked."""
+    values = [v for ref, v in secrets.items() if v and (not ref.startswith("header:") or len(v) >= 8)]
+
+    def _fail(i: int, op: Any) -> None:
+        raise ValueError(
+            f"Refusing to finalize: step {i} (op {op!r}) contains a registered secret value. "
+            "Re-record that step without the secret (use browser_fill/browser_type with a "
+            "registered value; secrets are injected at replay through secret_ref)."
+        )
+
+    for i, step in enumerate(steps):
+        blob = json.dumps(step, ensure_ascii=False)
+        if any(v in blob or json.dumps(v, ensure_ascii=False)[1:-1] in blob for v in values):
+            _fail(i, step.get("op"))
+    run, start = "", 0
+    for i, step in enumerate(steps + [{}]):  # sentinel flushes the last run
+        key = step.get("key") if step.get("op") == "press" else None
+        if isinstance(key, str) and len(key) == 1:
+            start = i if not run else start
+            run += key
+            continue
+        if run and any(v in run for v in values):
+            _fail(start, "press")
+        run = ""
 
 
 # Module-level singleton shared by the instrumented agent and the playbook tools.

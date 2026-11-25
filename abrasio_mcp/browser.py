@@ -19,7 +19,6 @@ from urllib.parse import unquote, urlsplit
 from abrasio import Abrasio, AbrasioConfig
 from abrasio.human.actions import (
     click_human,
-    fill_human,
     type_human,
     scroll_human,
     human_mouse_move,
@@ -123,6 +122,15 @@ def _cap_output(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n[truncated: {len(text) - MAX_OUTPUT_CHARS} more characters]"
 
 
+def _log_url(url: str) -> str:
+    """A URL for the logs: no userinfo, query string or fragment (tokens live there)."""
+    try:
+        p = urlsplit(url)
+        return p._replace(netloc=p.netloc.rpartition("@")[2], query="", fragment="").geturl()
+    except ValueError:
+        return "<unparseable url>"
+
+
 async def check_current_url(url: str, cloud: bool) -> None:
     """check_navigation_target for a URL a page is already on. Lets through only content
     that involves no network fetch: about:blank, about:srcdoc and data: (top-level data:
@@ -153,7 +161,7 @@ async def _guard_request(route, request) -> None:
     try:
         await check_navigation_target(request.url, cloud=False)
     except ValueError as exc:
-        logger.warning("Blocked request to %s: %s", request.url, exc)
+        logger.warning("Blocked request to %s: %s", _log_url(request.url), exc)
         await route.abort("blockedbyclient")
         return
     await route.fallback()
@@ -261,11 +269,11 @@ class AbrasioBrowserAgent:
             await check_current_url(frame.url, cloud=self._config.is_cloud_mode)
         except ValueError as exc:
             self._refusals += 1  # before neutralising: lets an in-flight _read notice
-            logger.warning("Leaving %s: %s", frame.url, exc)
+            logger.warning("Leaving %s: %s", _log_url(frame.url), exc)
             try:
                 await frame.goto("about:blank")
             except Exception:
-                logger.debug("could not leave %s", frame.url, exc_info=True)
+                logger.debug("could not leave %s", _log_url(frame.url), exc_info=True)
 
     async def _check_frames(self) -> None:
         """check_current_url over every frame of the page, one check per (scheme, host)."""
@@ -319,14 +327,17 @@ class AbrasioBrowserAgent:
 
     async def go_back(self) -> dict:
         await self._page.go_back(wait_until="domcontentloaded")
+        _recording.record("navigate", url=self._page.url)
         return {"url": self._page.url, "title": await self._page.title()}
 
     async def go_forward(self) -> dict:
         await self._page.go_forward(wait_until="domcontentloaded")
+        _recording.record("navigate", url=self._page.url)
         return {"url": self._page.url, "title": await self._page.title()}
 
     async def reload(self) -> dict:
         await self._page.reload(wait_until="domcontentloaded")
+        _recording.record("navigate", url=self._page.url)
         return {"url": self._page.url, "title": await self._page.title()}
 
     async def get_url(self) -> str:
@@ -365,15 +376,21 @@ class AbrasioBrowserAgent:
         _recording.record("click", selector=selector)
 
     async def fill(self, selector: str, text: str) -> None:
-        await fill_human(self._page, selector, text)
-        # C5: substitutes a secret_ref for registered values; hard-errors on an
-        # unregistered password value so raw credentials never reach `steps`.
-        await _recording.record_fill(self._page, selector, text)
+        # fill_human split open: the C5 guard runs after the click that focuses and
+        # before any keystroke, against the element that will actually receive the keys.
+        await click_human(self._page, selector)
+        step = await _recording.fill_step(self._page, selector, text)
+        await asyncio.sleep(0.15)
+        mac = "mac" in (getattr(self._page, "_abr_platform", "") or "").lower()
+        await self._page.keyboard.press(f"{'Meta' if mac else 'Control'}+a")
+        await type_human(self._page, text)
+        _recording.add(step)
 
     async def type_text(self, text: str) -> None:
+        # Same secret_ref / credential-field guard as fill, before typing.
+        step = await _recording.fill_step(self._page, None, text)
         await type_human(self._page, text)
-        # Same secret_ref / password-field guard as fill, against the focused element.
-        await _recording.record_fill(self._page, None, text)
+        _recording.add(step)
 
     async def scroll(self, pixels: int = 800) -> None:
         direction = 1 if pixels >= 0 else -1

@@ -1,22 +1,44 @@
 """Playbook tools — compile the current recording into a deterministic trajectory.
 
-These tools are meaningful during a RECORD run (ABRASIO_RECORD=true): the agent explores a
-site once, marks the data it wants, optionally captures the internal API call behind the
-page (T0), and finalizes a playbook the deterministic runtime replays with no LLM
-(spec 2026-07-10, Component 1).
+Registered only when the server runs with ABRASIO_RECORD=true: the agent explores a site
+once, marks the data it wants, optionally captures the internal API call behind the page
+(T0), and finalizes a playbook the deterministic runtime replays with no LLM
+(spec 2026-07-10, Component 1). `playbook_finalize` uploads the playbook to the
+ScrapeTech API itself (SCRAPETECH_API_URL / SCRAPETECH_API_KEY), so secret values never
+pass through the model and never touch the disk.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import tempfile
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlsplit
 
+import httpx
+
+from ..browser import _cap_output
 from ..recording import session
 
 if TYPE_CHECKING:
     from ..browser import AbrasioBrowserAgent  # noqa: F401
+
+API_URL_ENV = "SCRAPETECH_API_URL"
+API_KEY_ENV = "SCRAPETECH_API_KEY"
+DEFAULT_API_URL = "https://api.scrapetechnology.com"
+
+
+def _api_endpoint() -> tuple[str, str]:
+    """(POST url, api key) from the env. https only, except a loopback dev API."""
+    key = os.getenv(API_KEY_ENV, "").strip()
+    if not key:
+        raise ValueError(f"{API_KEY_ENV} is not set: playbook_finalize uploads the playbook itself "
+                         f"and needs a ScrapeTech API key in the MCP server's environment.")
+    base = os.getenv(API_URL_ENV, "").strip() or DEFAULT_API_URL
+    p = urlsplit(base)
+    if not p.hostname or not (p.scheme == "https" or (p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1"))):
+        raise ValueError(f"{API_URL_ENV} must be an https:// URL (http:// only for localhost/127.0.0.1).")
+    return base.rstrip("/") + "/api/playbooks", key
 
 
 def register(mcp, get_agent):
@@ -28,9 +50,10 @@ def register(mcp, get_agent):
         List the XHR/fetch calls captured while recording (method, url, status,
         request headers, content-type). Use this to find the internal JSON/API feed behind
         a page — the data endpoint you can replay directly over HTTP (T0), with no
-        browser. Only populated when the server runs with ABRASIO_RECORD=true.
+        browser. Header values other than benign ones (accept*, content-type, origin,
+        referer, user-agent, sec-*, …) are shown as "[redacted]".
         """
-        return json.dumps(session.list_requests(), ensure_ascii=False)
+        return _cap_output(json.dumps(session.list_requests(), ensure_ascii=False))
 
     @mcp.tool()
     async def playbook_register_secret(ref: str, value: str) -> str:
@@ -38,7 +61,8 @@ def register(mcp, get_agent):
         Register a credential BEFORE filling it, so the playbook stores a reference
         (secret_ref) instead of the raw value. Call this, then browser_fill with the same
         value — the recorded step will carry `secret_ref: <ref>`, never the plaintext.
-        Filling a password field with an unregistered value is a hard error.
+        Typing an unregistered value into a password / one-time-code / card field (or an
+        iframe or unknown target) is a hard error. Refs starting with "header:" are reserved.
         Example: playbook_register_secret("vault://example/pw", "hunter2").
         """
         session.register_secret(ref, value)
@@ -69,8 +93,8 @@ def register(mcp, get_agent):
         Compile the page's internal API call into a T0 (`http`) request step. Pass a url
         that appeared in browser_list_requests(). Emits an `op:"request"` step and switches
         the playbook transport to `http`, so replay is a plain HTTP poll with no browser.
-        Token-looking headers (Authorization, Cookie, …) each get their own ref, e.g.
-        `secret_ref:header:cookie`, never raw.
+        Every header except benign ones (accept*, content-type, origin, referer,
+        user-agent, sec-*, …) gets its own ref, e.g. `secret_ref:header:cookie`, never raw.
         """
         step = session.capture_request(url)
         return json.dumps({"captured": True, "transport": "http", "step": step}, ensure_ascii=False)
@@ -78,22 +102,41 @@ def register(mcp, get_agent):
     @mcp.tool()
     async def playbook_finalize(name: str, domain: str) -> str:
         """
-        Finalize the recorded trajectory. Writes the full `POST /api/playbooks` body
-        {name, domain, transport, steps, schema, profile_domain, secrets} to a private
-        temp file and returns {playbook_file, secret_refs, playbook} — `playbook` is the
-        same body WITHOUT `secrets`; secret values never come back here. POST the file
-        as-is to the api (which seals `secrets` into `secrets_enc`), then delete it.
-        Requires ABRASIO_RECORD=true to have captured any steps.
+        Finalize the recorded trajectory and upload it to the ScrapeTech API
+        (POST /api/playbooks, which seals the secrets). `domain` must be the host of the
+        first page you navigated to, or a parent domain of it. Fails if a registered
+        secret value shows up in any step. Returns the stored playbook's id, group_id,
+        version, health and step count — secret values never come back. On success the
+        recording is cleared, ready for the next one.
         """
+        url, key = _api_endpoint()
         body = session.finalize(name, domain)
-        secrets = body.pop("secrets")
-        # mkstemp: O_EXCL, mode 0600 on POSIX; on Windows the per-user %TEMP% ACL applies.
-        fd, path = tempfile.mkstemp(prefix="playbook-", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({**body, "secrets": secrets}, f, ensure_ascii=False)
+        secret_values = list(body["secrets"].values()) + [key]
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
+                resp = await client.post(url, json=body, headers={"X-API-KEY": key})
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Playbook upload failed: {type(exc).__name__}") from None
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if resp.status_code != 200 or not isinstance(data, dict) or not isinstance(data.get("playbook"), dict):
+            # Only a plain-string `detail` is echoed, and never if it carries a secret
+            # (a 422 echoes the request body, secrets included).
+            detail = data.get("detail") if isinstance(data, dict) else None
+            if not isinstance(detail, str) or any(v in detail for v in secret_values):
+                detail = ""
+            raise RuntimeError(f"Playbook upload failed: HTTP {resp.status_code} {detail[:300]}".rstrip())
+        pb = data["playbook"]
+        session.reset()
         return json.dumps({
-            "playbook_file": path,
-            "secret_refs": sorted(secrets),
-            "playbook": body,
-            "next": "POST playbook_file as-is to <api>/api/playbooks (X-API-KEY), then delete it.",
+            "uploaded": True,
+            "id": pb.get("id"),
+            "group_id": pb.get("group_id"),
+            "name": pb.get("name"),
+            "version": pb.get("version"),
+            "health": pb.get("health"),
+            "steps": len(body["steps"]),
+            "secret_refs": sorted(body["secrets"]),
         }, ensure_ascii=False)

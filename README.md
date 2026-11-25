@@ -92,6 +92,9 @@ All configuration is done via environment variables. No config files required.
 | `ABRASIO_TRANSPORT` | `stdio` | MCP transport: `stdio` (default) or `streamable-http` (local-only, unauthenticated; see below). |
 | `ABRASIO_HOST` | `127.0.0.1` | Bind host for `streamable-http`. Must be loopback (`127.0.0.1`, `localhost` or `::1`); any other value makes the server refuse to start. |
 | `ABRASIO_PORT` | `8931` | Bind port when using `streamable-http` transport. |
+| `ABRASIO_RECORD` | `false` | Set `true` to record a playbook and register the `playbook_*` / `browser_list_requests` tools. |
+| `SCRAPETECH_API_KEY` | _(none)_ | Recording only: ScrapeTech API key `playbook_finalize` uploads the playbook with. Required to finalize. |
+| `SCRAPETECH_API_URL` | `https://api.scrapetechnology.com` | Recording only: ScrapeTech API base URL. Must be `https://` (plain `http://` only for `localhost`/`127.0.0.1`). |
 
 ---
 
@@ -472,24 +475,22 @@ document.title
 
 ### Playbook recording (`ABRASIO_RECORD=true`)
 
+These tools exist only when the server runs with `ABRASIO_RECORD=true`.
+
 #### `playbook_finalize`
 
-Writes the full `POST /api/playbooks` body (`name`, `domain`, `transport`, `steps`, `schema`, `profile_domain`, `secrets`) to a new temp file (mode `0600` on POSIX, the per-user temp dir on Windows) and returns:
+Checks the recording, then the server itself sends `POST {SCRAPETECH_API_URL}/api/playbooks` with header `X-API-KEY: $SCRAPETECH_API_KEY` and the body `{name, domain, transport, steps, schema, profile_domain, secrets}` (the API seals `secrets`). No redirects are followed and nothing is written to disk. It returns only:
 
 ```json
-{"playbook_file": "/tmp/playbook-abc123.json",
- "secret_refs": ["header:cookie", "vault://example/pw"],
- "playbook": {"name": "...", "domain": "...", "transport": "...", "steps": [], "schema": null, "profile_domain": "..."},
- "next": "..."}
+{"uploaded": true, "id": "...", "group_id": "...", "name": "...", "version": 1, "health": "healthy",
+ "steps": 7, "secret_refs": ["header:cookie", "vault://example/pw"]}
 ```
 
-Secret values are never in the result. Send the file as-is, then delete it:
+and clears the recording for the next one. It refuses when `SCRAPETECH_API_KEY` is unset, when `domain` is not the host (or a parent domain of the host) of the first page navigated to, or when a registered secret value appears in any step (an `evaluate` script, keys pressed one by one, a URL, the schema). Error messages carry the HTTP status, never the response body's secrets.
 
-```bash
-curl -X POST "$API/api/playbooks" -H "X-API-KEY: $KEY" -H "Content-Type: application/json" --data-binary @/tmp/playbook-abc123.json
-```
+Credential guard: `browser_fill` / `browser_type` check the element that will receive the keys (the focused element, through shadow roots) before typing. A password, `autocomplete=*password` / `one-time-code` / `cc-*` field, an iframe, or no focused field needs the value registered first with `playbook_register_secret`.
 
-`playbook_capture_request` gives each token header its own ref: `secret_ref:header:cookie`, `secret_ref:header:authorization` (and `header:cookie:2` if the same header carried another value on a different captured request).
+`playbook_capture_request` turns every header except benign ones (`accept*`, `content-type`, `content-length`, `origin`, `referer`, `user-agent`, `x-requested-with`, `sec-*`, `cache-control`, `pragma`, `dnt`) into its own ref: `secret_ref:header:cookie`, `secret_ref:header:authorization` (and `header:cookie:2` if the same header carried another value on a different captured request). `browser_list_requests` shows those values as `[redacted]`.
 
 ---
 

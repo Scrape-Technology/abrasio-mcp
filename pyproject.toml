@@ -37,6 +37,7 @@ classifiers = [
 dependencies = [
     "mcp>=1.10,<2",
     "abrasio>=0.1.2",
+    "httpx>=0.27",  # playbook_finalize upload; already pulled in by mcp
 ]
 
 [project.optional-dependencies]

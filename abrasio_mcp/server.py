@@ -12,6 +12,9 @@ Environment variables:
   ABRASIO_TRANSPORT  — "stdio" (default) or "streamable-http"
   ABRASIO_HOST       — loopback host for streamable-http (default: 127.0.0.1)
   ABRASIO_PORT       — port for streamable-http (default: 8931)
+  ABRASIO_RECORD     — "true" records playbooks and registers the playbook_* tools
+  SCRAPETECH_API_KEY — ScrapeTech API key playbook_finalize uploads with (recording only)
+  SCRAPETECH_API_URL — ScrapeTech API base URL (default: https://api.scrapetechnology.com)
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .browser import AbrasioBrowserAgent
+from .recording import session as _recording
 from .tools import navigate, observe, interact, evaluate, playbook
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -75,8 +79,10 @@ navigate.register(mcp, _get_agent)
 observe.register(mcp, _get_agent)
 interact.register(mcp, _get_agent)
 evaluate.register(mcp, _get_agent)
-# Playbook Engine (spec 2026-07-10): recording/compile tools + network capture.
-playbook.register(mcp, _get_agent)
+# Playbook Engine (spec 2026-07-10): recording/compile tools + network capture, only
+# when recording is on (otherwise they would act on an empty, never-filled recording).
+if _recording.enabled:
+    playbook.register(mcp, _get_agent)
 
 
 # ---------------------------------------------------------------------------
