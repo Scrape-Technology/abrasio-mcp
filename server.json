@@ -8,12 +8,12 @@
     "url": "https://github.com/Scrape-Technology/abrasio-mcp",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "abrasio-mcp",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
