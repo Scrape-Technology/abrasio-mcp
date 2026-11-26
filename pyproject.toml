@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "abrasio-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "MCP server that exposes Abrasio as an agentic browser for AI models"
 readme = "README.md"
 license = { file = "LICENSE" }
